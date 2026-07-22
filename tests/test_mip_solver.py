@@ -29,3 +29,36 @@ def test_mip_solver_returns_solution_with_variables():
             if any(o.order_id == order.order_id for o in w.orders)
         )
         assert cnt == 1
+
+
+def test_mip_solver_c1_fulfillment_constraint():
+    """C1':Σ_s z_qty[i,k,s] = qty[i,k]。每订单的 SKU 需求必凑齐。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    # 每订单每 SKU 的总拣量 = 需求量
+    for order in inp.window_orders:
+        for line in order.lines:
+            picked = sum(
+                w.pick_qty.get((line.sku_id, s), 0)
+                for w in sol.wave_assignments
+                for s in [s2 for (sk, s2) in w.pick_qty.keys() if sk == line.sku_id]
+            )
+            assert picked == line.qty, (
+                f"订单 {order.order_id} 的 SKU {line.sku_id} "
+                f"拣量 {picked} ≠ 需求 {line.qty}"
+            )
+
+
+def test_mip_solver_c2_inventory_constraint():
+    """C2:Σ_i z_qty[i,k,s] ≤ inv[s,k]。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    for (shelf, sku), consumed in sol.consumption.items():
+        avail = inp.inv.inv.get((shelf, sku), 0)
+        assert consumed <= avail, (
+            f"({shelf},{sku}) 消耗 {consumed} > 库存 {avail}"
+        )
