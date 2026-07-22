@@ -1,0 +1,29 @@
+{
+  "description": "3 单/2 货架/3 SKU 最小用例。N_max=2 → 2 子波。最优分波 {A,C}+{B} 共 3 次访问。",
+  "N_max": 2,
+  "optimal_total_visits": 3,
+  "optimal_subwaves": [
+    {
+      "orders": ["A", "C"],
+      "visited_shelves": ["S1", "S2"],
+      "shelf_visits": 2
+    },
+    {
+      "orders": ["B"],
+      "visited_shelves": ["S2"],
+      "shelf_visits": 1
+    }
+  ],
+  "alternative_subwaves": [
+    {
+      "orders_partition": [["A", "B"], ["C"]],
+      "total_visits": 4,
+      "note": "次优:{A,B}+{C},访问 4 次"
+    }
+  ],
+  "hit_rate_per_subwave": [
+    {"subwave": 0, "hits": 3, "visits": 2, "hit_rate": 1.5},
+    {"subwave": 1, "hits": 2, "visits": 1, "hit_rate": 2.0}
+  ],
+  "average_hit_rate": 1.75
+}

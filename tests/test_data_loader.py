@@ -116,3 +116,18 @@ def test_load_inventory_get_snapshot_at(tmp_path):
         snapshots, datetime(2026, 7, 1, 14, 30)
     )
     assert snap_at_14_30.snapshot_time.hour == 14  # 取最近的 ≤ 14:30
+
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "tiny_case"
+
+
+def test_fixture_loads_clean():
+    orders = load_orders(FIXTURE_DIR / "orders.csv")
+    snaps = load_inventory_snapshots(FIXTURE_DIR / "inventory_snapshots.csv")
+    assert len(orders) == 3
+    assert len(snaps) == 1
+    snap = snaps[0]
+    # 全 SKU 都在映射里
+    assert snap.sku_shelves["K1"] == {"S1"}
+    assert snap.sku_shelves["K2"] == {"S1", "S2"}
+    assert snap.sku_shelves["K3"] == {"S2"}
