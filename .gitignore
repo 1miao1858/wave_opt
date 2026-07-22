@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+output/*.xlsx
+!output/.gitkeep
+data/orders.csv
+data/inventory_snapshots.csv
+data/sku_master.csv
+!data/.gitkeep

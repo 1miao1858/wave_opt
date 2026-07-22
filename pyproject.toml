@@ -1,0 +1,30 @@
+[project]
+name = "zu-bo-you-hua-poc"
+version = "0.1.0"
+description = "组波优化 POC:离线频率扫描 + Joint MIP"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "openpyxl>=3.1",
+    "gurobipy>=11.0",
+    "pyscipopt>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_backend"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
