@@ -154,8 +154,24 @@ class JointMIPSolver:
                                 name=f"C3b_{i}_{k}_{s}_{w}",
                             )
 
-        # C4 / C5 / 目标在 Task 9-10 完成
-        raise NotImplementedError("Task 9-10 待完成:C4/C5/目标")
+        # === C4. 子波组成(每订单必进且仅进一个子波)===
+        # Σ_{w ∈ W_sub} x[i,w] = 1   ∀ i ∈ I
+        for i in I:
+            m.addConstr(
+                gp.quicksum(x[(i, w)] for w in W_sub) == 1,
+                name=f"C4_{i}",
+            )
+
+        # === C5. 单子波订单数上限 ===
+        # Σ_{i ∈ I} x[i,w] ≤ N_max   ∀ w ∈ W_sub
+        for w in W_sub:
+            m.addConstr(
+                gp.quicksum(x[(i, w)] for i in I) <= inp.N_max,
+                name=f"C5_{w}",
+            )
+
+        # 目标在 Task 10 完成
+        raise NotImplementedError("Task 10 待完成:目标函数")
 
 
 def _skus_on_shelf(S_k: dict[str, list[str]], shelf: str) -> list[str]:

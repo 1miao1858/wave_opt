@@ -88,3 +88,36 @@ def test_mip_solver_c3_linking_h_sku_picked():
 
     # h 体现在 hit_rate 上,这里检查 hit_rate ≥ 1(每访问货架至少 1 hit)
     assert sol.hit_rate >= 1.0
+
+
+def test_mip_solver_c4_each_order_in_exactly_one_subwave():
+    """C4:Σ_w x[i,w] = 1。每订单必进且仅进一个子波。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    order_to_wave: dict[str, int] = {}
+    for w_idx, w in enumerate(sol.wave_assignments):
+        for o in w.orders:
+            assert o.order_id not in order_to_wave, (
+                f"订单 {o.order_id} 出现在多个子波里(C4 失效)"
+            )
+            order_to_wave[o.order_id] = w_idx
+
+    # 所有订单都进了一个子波
+    for order in inp.window_orders:
+        assert order.order_id in order_to_wave, (
+            f"订单 {order.order_id} 未被任何子波包含(C4 失效)"
+        )
+
+
+def test_mip_solver_c5_subwave_size_le_N_max():
+    """C5:Σ_i x[i,w] ≤ N_max。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    for w_idx, w in enumerate(sol.wave_assignments):
+        assert len(w.orders) <= inp.N_max, (
+            f"子波 {w_idx}:订单数 {len(w.orders)} > N_max={inp.N_max}(C5 失效)"
+        )
