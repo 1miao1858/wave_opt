@@ -70,3 +70,60 @@ def load_orders(path: Path | str) -> list[Order]:
             )
         )
     return orders
+
+
+@dataclass(frozen=True)
+class InventorySnapshot:
+    snapshot_time: datetime
+    # inv[(shelf_id, sku_id)] = qty(可能为 0,诊断用)
+    inv: dict[tuple[str, str], int] = field(default_factory=dict)
+    # 派生:shelf -> {sku}(qty > 0)
+    shelf_skus: dict[str, set[str]] = field(default_factory=dict)
+    # 派生:sku -> {shelf}(qty > 0),即 S(k)
+    sku_shelves: dict[str, set[str]] = field(default_factory=dict)
+
+    @staticmethod
+    def get_snapshot_at(
+        snapshots: list["InventorySnapshot"], t: datetime
+    ) -> "InventorySnapshot":
+        """取 snapshot_time ≤ t 的最近一个;若无,抛错。"""
+        candidates = [s for s in snapshots if s.snapshot_time <= t]
+        if not candidates:
+            raise ValueError(f"无早于 {t} 的库存快照")
+        return max(candidates, key=lambda s: s.snapshot_time)
+
+
+def load_inventory_snapshots(path: Path | str) -> list[InventorySnapshot]:
+    """加载 inventory_snapshots.csv,按时刻分组,派生 shelf_skus / sku_shelves。"""
+    path = Path(path)
+    df = pd.read_csv(path, dtype={"shelf_id": str, "sku_id": str})
+
+    required = {"snapshot_time", "shelf_id", "sku_id", "qty"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"inventory_snapshots.csv 缺列:{missing}")
+
+    df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+    df["qty"] = df["qty"].astype(int)
+    df = df.sort_values("snapshot_time")
+
+    snapshots: list[InventorySnapshot] = []
+    for snap_time, group in df.groupby("snapshot_time", sort=True):
+        inv: dict[tuple[str, str], int] = {}
+        shelf_skus: dict[str, set[str]] = {}
+        sku_shelves: dict[str, set[str]] = {}
+        for r in group.itertuples():
+            key = (r.shelf_id, r.sku_id)
+            inv[key] = int(r.qty)
+            if r.qty > 0:
+                shelf_skus.setdefault(r.shelf_id, set()).add(r.sku_id)
+                sku_shelves.setdefault(r.sku_id, set()).add(r.shelf_id)
+        snapshots.append(
+            InventorySnapshot(
+                snapshot_time=snap_time.to_pydatetime(),
+                inv=inv,
+                shelf_skus=shelf_skus,
+                sku_shelves=sku_shelves,
+            )
+        )
+    return snapshots
