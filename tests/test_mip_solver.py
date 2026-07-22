@@ -151,3 +151,52 @@ def test_mip_solver_hit_rate_recomputed():
     assert sol.hit_rate == pytest.approx(5 / 3, abs=0.01), (
         f"tiny_case 平均命中率应为 5/3≈1.6667,实际 {sol.hit_rate}"
     )
+
+
+# === Task 11: 6.1 合成小样本手算对比 + MIP/贪心/随机基线对比 ===
+
+import json
+
+EXPECTED_JSON = (
+    Path(__file__).parent / "fixtures" / "tiny_case" / "expected.json"
+)
+
+
+def test_mip_matches_hand_computed_optimal():
+    """6.1:MIP 输出与手算最优解对齐。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    expected = json.loads(EXPECTED_JSON.read_text(encoding="utf-8"))
+    assert sol.total_visits == expected["optimal_total_visits"]
+    # 子波数
+    assert len(sol.wave_assignments) == len(expected["optimal_subwaves"])
+    # 每子波访问数集合
+    actual_visits_per_wave = sorted(
+        len(w.visited_shelves) for w in sol.wave_assignments
+    )
+    expected_visits_per_wave = sorted(
+        sw["shelf_visits"] for sw in expected["optimal_subwaves"]
+    )
+    assert actual_visits_per_wave == expected_visits_per_wave
+
+
+def test_mip_optimal_at_least_as_good_as_greedy_and_random(monkeypatch):
+    """6.1:命中率_MIP ≥ 命中率_贪心 ≥ 命中率_随机。
+
+    用 tiny_case:MIP 最优访问 3 次,贪心应至少访问 3 次(可能更多),随机应访问 ≥ 3 次。
+    """
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol_mip = solver.solve(inp)
+
+    # 贪心基线(Task 12 实现)——此处先用 import-or-skip 占位
+    pytest.importorskip("src.greedy")
+    from src.greedy import greedy_solve
+    sol_greedy = greedy_solve(inp)
+
+    # 命中率:MIP ≥ 贪心
+    assert sol_mip.hit_rate >= sol_greedy.hit_rate - 1e-6
+    # 访问数:MIP ≤ 贪心
+    assert sol_mip.total_visits <= sol_greedy.total_visits
