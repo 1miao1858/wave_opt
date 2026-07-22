@@ -33,8 +33,10 @@ class WaveAssignment:
     subwave_idx: int  # 0-based
     orders: tuple[Order, ...]
     visited_shelves: tuple[str, ...]  # y[s,w]=1 的货架
-    # (sku, shelf) -> qty
+    # (sku, shelf) -> qty:子波内聚合拣量,用于 6.2/6.7 报告
     pick_qty: dict[tuple[str, str], int] = field(default_factory=dict)
+    # (order_id, sku, shelf) -> qty:按订单拆分,用于 6.8a/6.8b 验证检查
+    per_order_pick_qty: dict[tuple[str, str, str], int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -170,8 +172,97 @@ class JointMIPSolver:
                 name=f"C5_{w}",
             )
 
-        # 目标在 Task 10 完成
-        raise NotImplementedError("Task 10 待完成:目标函数")
+        # === 目标函数:min Σ_{w,s} y[s,w] ===
+        m.setObjective(gp.quicksum(y[(s, w)] for s in S for w in W_sub), GRB.MINIMIZE)
+
+        # === 求解 ===
+        m.optimize()
+
+        # === 提取结果 ===
+        if m.status == GRB.INFEASIBLE:
+            return MIPSolution(
+                status="infeasible",
+                wave_assignments=(),
+                total_visits=0,
+                hit_rate=0.0,
+                consumption={},
+                objective_value=0.0,
+                solver_name=self.solver_name,
+            )
+
+        # 子波组成:每订单进哪个子波
+        order_to_wave: dict[int, int] = {}
+        for i in I:
+            for w in W_sub:
+                if x[(i, w)].X > 0.5:
+                    order_to_wave[i] = w
+                    break
+
+        # 按子波聚合
+        wave_to_orders: dict[int, list] = {w: [] for w in W_sub}
+        for i, w in order_to_wave.items():
+            wave_to_orders[w].append(i)
+
+        wave_assignments: list[WaveAssignment] = []
+        consumption: dict[tuple[str, str], int] = {}
+        total_hits = 0
+        total_visits = 0
+
+        for w in W_sub:
+            order_idxs = wave_to_orders[w]
+            orders_in_w = tuple(orders_by_idx[i] for i in order_idxs)
+            visited: list[str] = []
+            pick_qty: dict[tuple[str, str], int] = {}
+            per_order_pick_qty: dict[tuple[str, str, str], int] = {}
+            shelf_sku_hits: dict[str, set[str]] = {}  # shelf -> {sku picked}
+
+            for i in order_idxs:
+                order_id = orders_by_idx[i].order_id
+                for k in K_i[i]:
+                    for s in S_k[k]:
+                        q = z_qty[(i, k, s)].X
+                        if q is None or q < 0.5:
+                            continue
+                        q_int = int(round(q))
+                        if q_int == 0:
+                            continue
+                        pick_qty[(k, s)] = pick_qty.get((k, s), 0) + q_int
+                        per_order_pick_qty[(order_id, k, s)] = q_int
+                        consumption[(s, k)] = consumption.get((s, k), 0) + q_int
+                        if s not in visited:
+                            visited.append(s)
+                        shelf_sku_hits.setdefault(s, set()).add(k)
+
+            # 用 y[(s,w)].X 校验
+            y_visited = [s for s in S if y[(s, w)].X > 0.5]
+            visited = visited if visited else y_visited  # 优先用 z_qty 推
+
+            hits = sum(len(sk_set) for sk_set in shelf_sku_hits.values())
+            total_hits += hits
+            total_visits += len(visited)
+
+            wave_assignments.append(
+                WaveAssignment(
+                    subwave_idx=w,
+                    orders=orders_in_w,
+                    visited_shelves=tuple(visited),
+                    pick_qty=pick_qty,
+                    per_order_pick_qty=per_order_pick_qty,
+                )
+            )
+
+        hit_rate = (total_hits / total_visits) if total_visits > 0 else 0.0
+
+        return MIPSolution(
+            status="optimal" if m.status == GRB.OPTIMAL else "time_limit",
+            wave_assignments=tuple(wave_assignments),
+            total_visits=total_visits,
+            hit_rate=hit_rate,
+            consumption=consumption,
+            objective_value=m.ObjVal if m.ObjVal is not None else 0.0,
+            mip_gap=m.MIPGap if m.MIPGap is not None else None,
+            solver_name=self.solver_name,
+        )
 
 
 def _skus_on_shelf(S_k: dict[str, list[str]], shelf: str) -> list[str]:

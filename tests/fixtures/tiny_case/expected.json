@@ -25,5 +25,6 @@
     {"subwave": 0, "hits": 3, "visits": 2, "hit_rate": 1.5},
     {"subwave": 1, "hits": 2, "visits": 1, "hit_rate": 2.0}
   ],
-  "average_hit_rate": 1.75
+  "average_hit_rate": 1.6667,
+  "average_hit_rate_formula": "Σ hits / Σ visits = (3+2)/(2+1) = 5/3 (spec line 348,聚合比非算术均)"
 }

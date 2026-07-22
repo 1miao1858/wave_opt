@@ -38,12 +38,14 @@ def test_mip_solver_c1_fulfillment_constraint():
     sol = solver.solve(inp)
 
     # 每订单每 SKU 的总拣量 = 需求量
+    # 用 per_order_pick_qty(按订单拆分),避免子波内多订单聚合造成假阳
     for order in inp.window_orders:
         for line in order.lines:
             picked = sum(
-                w.pick_qty.get((line.sku_id, s), 0)
+                q
                 for w in sol.wave_assignments
-                for s in [s2 for (sk, s2) in w.pick_qty.keys() if sk == line.sku_id]
+                for (oid, sk, _shelf), q in w.per_order_pick_qty.items()
+                if oid == order.order_id and sk == line.sku_id
             )
             assert picked == line.qty, (
                 f"订单 {order.order_id} 的 SKU {line.sku_id} "
@@ -121,3 +123,31 @@ def test_mip_solver_c5_subwave_size_le_N_max():
         assert len(w.orders) <= inp.N_max, (
             f"子波 {w_idx}:订单数 {len(w.orders)} > N_max={inp.N_max}(C5 失效)"
         )
+
+
+def test_mip_solver_objective_minimizes_total_visits():
+    """主指标:min Σ y[s,w]。tiny_case 手算最优 = 3。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    assert sol.status == "optimal"
+    assert sol.total_visits == 3, (
+        f"tiny_case 最优访问数应为 3,实际 {sol.total_visits}"
+    )
+    assert sol.objective_value == 3
+
+
+def test_mip_solver_hit_rate_recomputed():
+    """命中率从 h 推算。spec line 348: 平均命中率 = Σ hits / Σ visits。
+    tiny_case: 子波 0 hits=3 visits=2;子波 1 hits=2 visits=1
+    平均 = (3+2) / (2+1) = 5/3 ≈ 1.6667
+    """
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    # 平均命中率 = Σ hits / Σ visits(spec line 348,聚合比,非算术均)
+    assert sol.hit_rate == pytest.approx(5 / 3, abs=0.01), (
+        f"tiny_case 平均命中率应为 5/3≈1.6667,实际 {sol.hit_rate}"
+    )
