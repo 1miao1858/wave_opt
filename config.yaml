@@ -1,0 +1,44 @@
+sub_problems:
+  jia_gong_le_20:
+    wave_type: 加工
+    size_class: le_20
+    N_max: 50
+  jia_gong_gt_20:
+    wave_type: 加工
+    size_class: gt_20
+    N_max: 20
+  fei_jia_gong_le_20:
+    wave_type: 非加工
+    size_class: le_20
+    N_max: 80
+  fei_jia_gong_gt_20:
+    wave_type: 非加工
+    size_class: gt_20
+    N_max: 30
+
+sweep:
+  num_pickers: 4
+  pick_time_per_order: 120        # 秒/单
+  num_machines: 2
+  process_time_per_jian: 36      # 秒/件
+  K_ws: 8                         # 工作站并行容量(诊断用,不约束 MIP)
+  daily_cutoff: "14:00"
+  daily_deadline: "18:00"
+  picker_shift_start: "08:00"
+  picker_shift_end: "18:00"
+  machine_shift_start: "08:00"
+  machine_shift_end: "18:00"
+
+candidate_W: ["1h", "2h", "4h"]
+
+mip:
+  solver: gurobi
+  time_limit: 60
+  mip_gap: 0.05
+  fallback: greedy
+
+validation:
+  recomputed_hit_rate: true
+  boundary_check: true
+  inventory_consistency_sample: 5
+  stockout_filter_sample: 10
