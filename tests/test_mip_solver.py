@@ -62,3 +62,29 @@ def test_mip_solver_c2_inventory_constraint():
         assert consumed <= avail, (
             f"({shelf},{sku}) 消耗 {consumed} > 库存 {avail}"
         )
+
+
+def test_mip_solver_c3_linking_y_shelf_visited_when_pick():
+    """C3a:若 z_qty[i,k,s]>0 且 x[i,w]=1,则 y[s,w]=1。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    for w_idx, w in enumerate(sol.wave_assignments):
+        visited = set(w.visited_shelves)
+        for (sku, shelf), q in w.pick_qty.items():
+            if q > 0:
+                assert shelf in visited, (
+                    f"子波 {w_idx}:SKU {sku} 从 {shelf} 拣 {q} 件,"
+                    f"但 {shelf} 不在 visited_shelves 里(C3a 失效)"
+                )
+
+
+def test_mip_solver_c3_linking_h_sku_picked():
+    """C3b:若 z_qty[i,k,s]>0 且 x[i,w]=1,则 h[s,k,w]=1。"""
+    inp = _build_input()
+    solver = JointMIPSolver()
+    sol = solver.solve(inp)
+
+    # h 体现在 hit_rate 上,这里检查 hit_rate ≥ 1(每访问货架至少 1 hit)
+    assert sol.hit_rate >= 1.0

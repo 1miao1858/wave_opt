@@ -135,8 +135,27 @@ class JointMIPSolver:
                     name=f"C2_{s}_{k}",
                 )
 
-        # C3 / C4 / C5 / 目标在 Task 8-10 完成
-        raise NotImplementedError("Task 8-10 待完成:C3/C4/C5/目标")
+        # === C3. 访问与拣货关联(通过 (1-x[i,w]) 隐式按子波关联)===
+        # C3a: z_qty[i,k,s] ≤ M_big × y[s,w] + M_big × (1 - x[i,w])    ∀ i,k,s,w
+        # C3b: z_qty[i,k,s] ≤ M_big × h[s,k,w] + M_big × (1 - x[i,w])  ∀ i,k,s,w
+        for i in I:
+            for k in K_i[i]:
+                for s in S_k[k]:
+                    for w in W_sub:
+                        m.addConstr(
+                            z_qty[(i, k, s)]
+                            <= M_big * y[(s, w)] + M_big * (1 - x[(i, w)]),
+                            name=f"C3a_{i}_{k}_{s}_{w}",
+                        )
+                        if (s, k, w) in h:
+                            m.addConstr(
+                                z_qty[(i, k, s)]
+                                <= M_big * h[(s, k, w)] + M_big * (1 - x[(i, w)]),
+                                name=f"C3b_{i}_{k}_{s}_{w}",
+                            )
+
+        # C4 / C5 / 目标在 Task 9-10 完成
+        raise NotImplementedError("Task 9-10 待完成:C4/C5/目标")
 
 
 def _skus_on_shelf(S_k: dict[str, list[str]], shelf: str) -> list[str]:
