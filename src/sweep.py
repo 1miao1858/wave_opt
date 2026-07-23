@@ -28,6 +28,35 @@ class WindowResult:
     notes: tuple[str, ...] = ()
 
 
+MAX_SUBWAVES = 10  # Filter 1 阈值
+
+
+def _subwave_count(n_orders: int, N_max: int) -> int:
+    return max(1, (n_orders + N_max - 1) // N_max)
+
+
+def check_filter1(n_orders: int, N_max: int) -> tuple[bool, str]:
+    """Filter 1:|W_sub| = ceil(n/N_max),> 10 不可行。"""
+    n_sub = _subwave_count(n_orders, N_max)
+    if n_sub > MAX_SUBWAVES:
+        return False, f"subwave_count_too_large_{n_sub}_>{MAX_SUBWAVES}"
+    return True, ""
+
+
+def check_daily_deadline(
+    total_daily_orders: int, cfg: Config, daily_available_seconds: int
+) -> tuple[bool, str]:
+    """Filter 4:全日订单量 × 单单单耗 ≤ daily_available_seconds × num_pickers。"""
+    total_pick_seconds = total_daily_orders * cfg.sweep.pick_time_per_order
+    capacity_seconds = daily_available_seconds * cfg.sweep.num_pickers
+    if total_pick_seconds > capacity_seconds:
+        return False, (
+            f"daily_deadline_overflow: "
+            f"need {total_pick_seconds}s > capacity {capacity_seconds}s"
+        )
+    return True, ""
+
+
 def _prefilter_stockout(
     orders: list[Order], inv: InventorySnapshot
 ) -> tuple[list[Order], list[tuple[str, str]]]:
@@ -79,6 +108,22 @@ def simulate_window(
         )
 
     sub_cfg = cfg.sub_problems[sub_problem_key]
+
+    # === Filter 1:MIP sizing(子波数 ≤ 10)===
+    ok1, reason1 = check_filter1(len(kept_orders), sub_cfg.N_max)
+    if not ok1:
+        return WindowResult(
+            window_start=window_start,
+            sub_problem_key=sub_problem_key,
+            feasible=False,
+            solution=None,
+            total_visits=0,
+            picker_utilization=0.0,
+            machine_utilization=None,
+            rejected_order_ids=rejected_ids,
+            reject_reasons=reject_reasons,
+            notes=(reason1,),
+        )
 
     # === Filter 2:拣货员利用率 Σ 单单单耗 / num_pickers ≤ W ===
     total_pick_time = sum(

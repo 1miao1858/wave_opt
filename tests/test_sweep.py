@@ -155,7 +155,63 @@ def test_machine_utilization_only_for_jia_gong():
         inv=snaps[0],
         cfg=cfg,
         sub_problem_key="fei_jia_gong_le_20",
-        window_start=datetime.datetime(2026, 7, 1, 14, 0),
         W_seconds=3600,
     )
     assert result.machine_utilization is None  # 非加工不查机器
+
+
+# === Task 22: Filter 1 MIP sizing + Filter 4 每日时效 ===
+
+
+def test_filter1_rejects_when_subwave_count_too_large():
+    """N_max=1,30 单 → 30 子波 > 10 → 不可行。"""
+    orders = [
+        Order(
+            order_id=f"O{i}",
+            timestamp=datetime.datetime(2026, 7, 1, 14, 0),
+            wave_type="非加工",
+            lines=(OrderLine(sku_id="K1", qty=1),),
+            件数=1,
+            size_class="le_20",
+            sub_problem_key=("非加工", "le_20"),
+        )
+        for i in range(30)
+    ]
+    snaps = load_inventory_snapshots(FIXTURE / "inventory_snapshots.csv")
+    cfg = _make_config(N_max=1)
+
+    result = simulate_window(
+        window_orders=orders,
+        inv=snaps[0],
+        cfg=cfg,
+        sub_problem_key="fei_jia_gong_le_20",
+        W_seconds=3600,
+    )
+    assert not result.feasible
+    assert any("subwave_count_too_large" in n for n in result.notes)
+
+
+def test_filter4_daily_deadline():
+    """Filter 4:全日订单量 × 单耗 ≤ 日可用工时 × num_pickers。
+
+    8h × 3600 × 4 picker = 115200s 容量 / 120s 单耗 = 960 单/日上限
+    """
+    from src.sweep import check_daily_deadline
+
+    cfg = _make_config(N_max=2)
+    # 1000 单 × 120s = 120000s > 115200s 容量 → 违反
+    feasible, reason = check_daily_deadline(
+        total_daily_orders=1000,
+        cfg=cfg,
+        daily_available_seconds=8 * 3600,
+    )
+    assert not feasible
+    assert "deadline" in reason.lower() or "overflow" in reason.lower()
+
+    # 100 单 × 120s = 12000s < 115200s 容量 → 可行
+    feasible, _ = check_daily_deadline(
+        total_daily_orders=100,
+        cfg=cfg,
+        daily_available_seconds=8 * 3600,
+    )
+    assert feasible
