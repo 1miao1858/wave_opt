@@ -208,3 +208,41 @@ def check_cross_subwave_split(
                 )
             )
     return issues
+
+
+def check_inventory_consistency(
+    inv_before: InventorySnapshot,
+    inv_after: InventorySnapshot,
+    consumption: dict[tuple[str, str], int],
+) -> list[ValidationIssue]:
+    """6.3:inv_after_computed = inv_before - consumption;与真实 inv_after 对比。
+
+    补货会让 inv_after > inv_after_computed(预期);若 inv_after < inv_after_computed,
+    一定有 bug(消耗算错或库存快照错位)。
+    """
+    issues: list[ValidationIssue] = []
+    for (shelf, sku), consumed in consumption.items():
+        before = inv_before.inv.get((shelf, sku), 0)
+        after_real = inv_after.inv.get((shelf, sku), 0)
+        after_computed = before - consumed
+        if after_real < after_computed:
+            issues.append(
+                ValidationIssue(
+                    check_name="6.3_inventory_consistency",
+                    severity="error",
+                    message=(
+                        f"({shelf},{sku}):before={before},消耗={consumed},"
+                        f"computed_after={after_computed},但真实 next={after_real}"
+                        f"(next < computed,可能消耗算错或库存快照错位)"
+                    ),
+                    context={
+                        "shelf": shelf,
+                        "sku": sku,
+                        "before": before,
+                        "consumed": consumed,
+                        "after_computed": after_computed,
+                        "after_real": after_real,
+                    },
+                )
+            )
+    return issues

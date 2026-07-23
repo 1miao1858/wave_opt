@@ -18,6 +18,7 @@ from src.validation import (
     recompute_total_visits,
     check_subwave_internal_split,
     check_cross_subwave_split,
+    check_inventory_consistency,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_case"
@@ -227,3 +228,44 @@ def test_cross_subwave_split_detects_when_present():
         and i.context["sku"] == "K2"
         for i in issues
     )
+
+
+# === Task 18: 6.3 库存一致性抽样检查 ===
+
+
+def test_inventory_consistency_ok_when_next_snapshot_higher():
+    """补货会让 next > computed;不报错。"""
+    inv_before = InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 14, 0),
+        inv={("S1", "K1"): 5, ("S2", "K2"): 5},
+        shelf_skus={"S1": {"K1"}, "S2": {"K2"}},
+        sku_shelves={"K1": {"S1"}, "K2": {"S2"}},
+    )
+    inv_after = InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 15, 0),
+        inv={("S1", "K1"): 7, ("S2", "K2"): 4},  # S1 补货 2,S2 减 1
+        shelf_skus={"S1": {"K1"}, "S2": {"K2"}},
+        sku_shelves={"K1": {"S1"}, "K2": {"S2"}},
+    )
+    # 消耗:S1 K1 消耗 2,S2 K2 消耗 3
+    consumption = {("S1", "K1"): 2, ("S2", "K2"): 3}
+    issues = check_inventory_consistency(inv_before, inv_after, consumption)
+    # S1:5 - 2 = 3 < 7(补货,OK);S2:5 - 3 = 2 < 4(补货 2,OK)
+    assert issues == []
+
+
+def test_inventory_consistency_detects_when_next_lower_than_computed():
+    """若 next < inv_after_computed,一定有 bug。"""
+    inv_before = InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 14, 0),
+        inv={("S1", "K1"): 10},
+        shelf_skus={"S1": {"K1"}}, sku_shelves={"K1": {"S1"}},
+    )
+    inv_after = InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 15, 0),
+        inv={("S1", "K1"): 2},  # before 10 - 消耗 3 = 7,但 next = 2 < 7
+        shelf_skus={"S1": {"K1"}}, sku_shelves={"K1": {"S1"}},
+    )
+    consumption = {("S1", "K1"): 3}
+    issues = check_inventory_consistency(inv_before, inv_after, consumption)
+    assert any(i.check_name == "6.3_inventory_consistency" for i in issues)
