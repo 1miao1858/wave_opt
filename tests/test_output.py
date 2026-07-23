@@ -120,3 +120,33 @@ def test_excel_sheet3_has_hit_rate_and_utilization(tmp_path):
     assert "加工利用率" in headers
     data_rows = list(ws.iter_rows(min_row=2, values_only=True))
     assert len(data_rows) >= 1
+
+
+def test_excel_sheet4_has_wave_details(tmp_path):
+    results = _build_sweep_results()
+    out_file = tmp_path / "out.xlsx"
+    write_excel(results, out_file)
+
+    wb = load_workbook(out_file)
+    assert "Sheet4_波次明细" in wb.sheetnames
+    ws = wb["Sheet4_波次明细"]
+    headers = [c.value for c in ws[1]]
+    expected_cols = [
+        "波次ID",
+        "子问题",
+        "窗口ID",
+        "子波序号",
+        "触发时刻",
+        "窗口时段",
+        "订单数",
+        "订单列表",
+        "访问货架数",
+        "hits",
+        "命中率",
+        "库存消耗明细",
+    ]
+    for col in expected_cols:
+        assert col in headers, f"缺列:{col}"
+    # tiny_case 1 窗口 × 2 子波 → 至少 2 行
+    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+    assert len(data_rows) >= 2

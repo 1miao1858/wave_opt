@@ -1,6 +1,7 @@
 """Excel 5 Sheet 输出。"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterable
 
@@ -188,13 +189,85 @@ def _write_sheet3(wb: Workbook, results: dict[str, SweepResult]) -> None:
             ])
 
 
+def _write_sheet4(wb: Workbook, results: dict[str, SweepResult]) -> None:
+    ws = wb.create_sheet("Sheet4_波次明细")
+    headers = [
+        "波次ID",
+        "子问题",
+        "窗口ID",
+        "子波序号",
+        "触发时刻",
+        "窗口时段",
+        "订单数",
+        "订单列表",
+        "访问货架数",
+        "hits",
+        "命中率",
+        "库存消耗明细",
+    ]
+    ws.append(headers)
+    for col in ws[1]:
+        col.fill = HEADER_FILL
+        col.font = HEADER_FONT
+
+    for sp, result in results.items():
+        if not result.best_W:
+            continue
+        # 只输出最优 W 下的窗口
+        best_W = result.best_W
+        for w_idx, w_result in enumerate(
+            result.window_results_by_W.get(best_W, [])
+        ):
+            if not w_result.feasible or w_result.solution is None:
+                continue
+            sol = w_result.solution
+            window_id = (
+                w_result.window_start.isoformat()
+                if w_result.window_start
+                else f"W{w_idx}"
+            )
+            for sw in sol.wave_assignments:
+                # hits = Σ_{s} |{k picked}|
+                shelf_sku_hits: dict[str, set[str]] = {}
+                for (sku, shelf), q in sw.pick_qty.items():
+                    if q > 0:
+                        shelf_sku_hits.setdefault(shelf, set()).add(sku)
+                hits = sum(len(s) for s in shelf_sku_hits.values())
+                visits = len(sw.visited_shelves)
+                hit_rate = (hits / visits) if visits > 0 else 0.0
+                consumption_detail = {
+                    sku: {shelf: q}
+                    for (sku, shelf), q in sw.pick_qty.items()
+                    if q > 0
+                }
+                ws.append([
+                    f"{sp}-{w_idx}-{sw.subwave_idx}",
+                    sp,
+                    window_id,
+                    sw.subwave_idx,
+                    (
+                        w_result.window_start.isoformat()
+                        if w_result.window_start
+                        else ""
+                    ),
+                    window_id,
+                    len(sw.orders),
+                    ",".join(o.order_id for o in sw.orders),
+                    visits,
+                    hits,
+                    round(hit_rate, 4),
+                    json.dumps(consumption_detail, ensure_ascii=False),
+                ])
+
+
 def write_excel(results: dict[str, SweepResult], out_path: Path | str) -> None:
-    """写完整 Excel(5 Sheet)。Sheet 1-3 在此实现,Sheet 4-5 在 Task 27-28 添加。"""
+    """写完整 Excel(5 Sheet)。Sheet 1-4 在此实现,Sheet 5 在 Task 28 添加。"""
     out_path = Path(out_path)
     wb = Workbook()
     wb.remove(wb.active)  # 删默认 Sheet
     _write_sheet1(wb, results)
     _write_sheet2(wb, results)
     _write_sheet3(wb, results)
-    # Sheet 4-5 在 Task 27-28 添加
+    _write_sheet4(wb, results)
+    # Sheet 5 在 Task 28 添加
     wb.save(out_path)
