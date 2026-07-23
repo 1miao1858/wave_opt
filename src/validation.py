@@ -87,3 +87,42 @@ def check_boundary(sol: MIPSolution, max_skus_per_shelf: int) -> list[Validation
                 )
             )
     return issues
+
+
+def recompute_total_visits(sol: MIPSolution) -> list[ValidationIssue]:
+    """6.7:从 z_qty 推 y[s,w],独立复算总访问数。"""
+    issues: list[ValidationIssue] = []
+    total = 0
+    for w in sol.wave_assignments:
+        # 从 pick_qty 推 visited_shelves
+        derived = {shelf for (sku, shelf), q in w.pick_qty.items() if q > 0}
+        # 与 MIP 报告的 visited_shelves 比对
+        if derived != set(w.visited_shelves):
+            issues.append(
+                ValidationIssue(
+                    check_name="6.7_recompute_total_visits",
+                    severity="error",
+                    message=(
+                        f"子波 {w.subwave_idx}:从 z_qty 推货架 {sorted(derived)} ≠ "
+                        f"MIP 报告 {sorted(w.visited_shelves)}"
+                    ),
+                    context={
+                        "subwave_idx": w.subwave_idx,
+                        "derived": sorted(derived),
+                        "reported": sorted(w.visited_shelves),
+                    },
+                )
+            )
+        total += len(derived)
+    if total != sol.total_visits:
+        issues.append(
+            ValidationIssue(
+                check_name="6.7_recompute_total_visits",
+                severity="error",
+                message=(
+                    f"MIP 报告总访问数 {sol.total_visits} 与复算 {total} 不符"
+                ),
+                context={"reported": sol.total_visits, "recomputed": total},
+            )
+        )
+    return issues

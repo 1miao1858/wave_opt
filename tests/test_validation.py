@@ -4,7 +4,12 @@ import dataclasses
 import pytest
 from src.data_loader import load_orders, load_inventory_snapshots
 from src.mip_solver import MIPInput, JointMIPSolver, MIPSolution
-from src.validation import recompute_hit_rate, ValidationIssue, check_boundary
+from src.validation import (
+    recompute_hit_rate,
+    ValidationIssue,
+    check_boundary,
+    recompute_total_visits,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_case"
 
@@ -59,3 +64,20 @@ def test_boundary_check_detects_hit_rate_below_one():
     )
     issues = check_boundary(bad_sol, max_skus_per_shelf=2)
     assert any(i.check_name == "6.5_boundary" and i.severity == "error" for i in issues)
+
+
+# === Task 15: 6.7 总访问数独立复算 ===
+
+
+def test_recompute_total_visits_matches_mip():
+    sol, _ = _build_solution()
+    issues = recompute_total_visits(sol)
+    assert issues == []
+
+
+def test_recompute_total_visits_detects_mismatch():
+    sol, _ = _build_solution()
+    bad_sol = dataclasses.replace(sol, total_visits=sol.total_visits + 1)
+    issues = recompute_total_visits(bad_sol)
+    assert len(issues) >= 1
+    assert issues[0].check_name == "6.7_recompute_total_visits"
