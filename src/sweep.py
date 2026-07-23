@@ -5,7 +5,9 @@ SweepRunner:4 子问题 × 3 W × 多日窗口主循环。
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Iterable
 
 from src.config import Config
@@ -216,3 +218,164 @@ def simulate_window(
         reject_reasons=reject_reasons,
         notes=tuple(notes),
     )
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    sub_problem_key: str
+    best_W: str | None
+    best_total_visits: int | None
+    # 每 W 的聚合
+    window_results_by_W: dict[str, list[WindowResult]]  # W -> [per-window results]
+
+    @property
+    def avg_visits_by_W(self) -> dict[str, float]:
+        return {
+            w: (sum(r.total_visits for r in rs) / len(rs) if rs else 0.0)
+            for w, rs in self.window_results_by_W.items()
+        }
+
+
+def _parse_W(W_str: str) -> int:
+    """'1h' -> 3600, '2h' -> 7200, '4h' -> 14400。"""
+    if W_str.endswith("h"):
+        return int(W_str[:-1]) * 3600
+    raise ValueError(f"不支持的 W 格式:{W_str}(仅支持 'Nh')")
+
+
+def _windows_for_day(W_seconds: int, day_start: datetime, day_end: datetime):
+    """生成 [day_start, day_end) 内的 W 窗口起始时刻列表。"""
+    windows = []
+    t = day_start
+    while t < day_end:
+        windows.append(t)
+        t = t + timedelta(seconds=W_seconds)
+    return windows
+
+
+class SweepRunner:
+    """4 子问题 × 3 W × 多日窗口主循环。"""
+
+    def __init__(
+        self,
+        cfg: Config,
+        all_orders: list[Order],
+        snapshots: list[InventorySnapshot],
+    ):
+        self.cfg = cfg
+        self.all_orders = all_orders
+        self.snapshots = sorted(snapshots, key=lambda s: s.snapshot_time)
+
+    def _orders_in_window(
+        self, window_start: datetime, W_seconds: int, sub_problem_key: str
+    ) -> list[Order]:
+        end = window_start + timedelta(seconds=W_seconds)
+        sub_cfg = self.cfg.sub_problems[sub_problem_key]
+        return [
+            o
+            for o in self.all_orders
+            if o.sub_problem_key == (sub_cfg.wave_type, sub_cfg.size_class)
+            and window_start <= o.timestamp < end
+        ]
+
+    def run_sub_problem(self, sub_problem_key: str) -> SweepResult:
+        results_by_W: dict[str, list[WindowResult]] = {
+            W: [] for W in self.cfg.candidate_W
+        }
+
+        if not self.all_orders:
+            return SweepResult(
+                sub_problem_key=sub_problem_key,
+                best_W=None,
+                best_total_visits=None,
+                window_results_by_W=results_by_W,
+            )
+
+        min_day = min(o.timestamp.date() for o in self.all_orders)
+        max_day = max(o.timestamp.date() for o in self.all_orders)
+        day = min_day
+        while day <= max_day:
+            # 每日可用工时(简化:从 picker_shift_start 到 picker_shift_end)
+            day_start = datetime.combine(
+                day,
+                datetime.strptime(self.cfg.sweep.picker_shift_start, "%H:%M").time(),
+            )
+            day_end = datetime.combine(
+                day,
+                datetime.strptime(self.cfg.sweep.picker_shift_end, "%H:%M").time(),
+            )
+            daily_available_seconds = (day_end - day_start).total_seconds()
+
+            # Filter 4:每日时效
+            sub_cfg = self.cfg.sub_problems[sub_problem_key]
+            day_orders_count = sum(
+                1
+                for o in self.all_orders
+                if o.sub_problem_key == (sub_cfg.wave_type, sub_cfg.size_class)
+                and o.timestamp.date() == day
+            )
+            ok4, reason4 = check_daily_deadline(
+                day_orders_count, self.cfg, int(daily_available_seconds)
+            )
+            if not ok4:
+                # 全日不可行,跳过所有 W(记到结果里)
+                for W in self.cfg.candidate_W:
+                    fake_result = WindowResult(
+                        window_start=day_start,
+                        sub_problem_key=sub_problem_key,
+                        feasible=False,
+                        solution=None,
+                        total_visits=0,
+                        picker_utilization=0.0,
+                        machine_utilization=None,
+                        rejected_order_ids=(),
+                        reject_reasons=(),
+                        notes=(reason4,),
+                    )
+                    results_by_W[W].append(fake_result)
+                day += timedelta(days=1)
+                continue
+
+            for W in self.cfg.candidate_W:
+                W_seconds = _parse_W(W)
+                for w_start in _windows_for_day(W_seconds, day_start, day_end):
+                    window_orders = self._orders_in_window(
+                        w_start, W_seconds, sub_problem_key
+                    )
+                    if not window_orders:
+                        continue
+                    inv = InventorySnapshot.get_snapshot_at(self.snapshots, w_start)
+                    result = simulate_window(
+                        window_orders=window_orders,
+                        inv=inv,
+                        cfg=self.cfg,
+                        sub_problem_key=sub_problem_key,
+                        window_start=w_start,
+                        W_seconds=W_seconds,
+                    )
+                    results_by_W[W].append(result)
+
+            day += timedelta(days=1)
+
+        # best_W:可行集中总访问数之和最小(若并列看命中率方差小——简化:取首个)
+        feasible_Ws = {
+            W: rs
+            for W, rs in results_by_W.items()
+            if rs and all(r.feasible for r in rs)
+        }
+        if not feasible_Ws:
+            best_W = None
+            best_total = None
+        else:
+            totals = {
+                W: sum(r.total_visits for r in rs) for W, rs in feasible_Ws.items()
+            }
+            best_W = min(totals, key=totals.get)
+            best_total = totals[best_W]
+
+        return SweepResult(
+            sub_problem_key=sub_problem_key,
+            best_W=best_W,
+            best_total_visits=best_total,
+            window_results_by_W=results_by_W,
+        )

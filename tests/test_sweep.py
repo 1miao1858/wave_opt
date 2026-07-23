@@ -215,3 +215,27 @@ def test_filter4_daily_deadline():
         daily_available_seconds=8 * 3600,
     )
     assert feasible
+
+
+# === Task 23: SweepRunner 主循环 + best_W 选择 ===
+
+
+def test_sweep_runner_picks_lowest_visits_W():
+    """对 tiny_case + 3 个候选 W,选总访问数最小的 W。"""
+    from src.sweep import SweepRunner, SweepResult
+
+    orders = load_orders(FIXTURE / "orders.csv")
+    snaps = load_inventory_snapshots(FIXTURE / "inventory_snapshots.csv")
+    cfg = _make_config(N_max=2)
+
+    runner = SweepRunner(cfg=cfg, all_orders=orders, snapshots=snaps)
+    result = runner.run_sub_problem(
+        sub_problem_key="fei_jia_gong_le_20",
+    )
+
+    assert isinstance(result, SweepResult)
+    assert result.best_W is not None
+    # 所有 W 都可行(因为单少,不会爆产能)
+    assert result.best_total_visits >= 3
+    # 至少有一个 W 的明细
+    assert len(result.window_results_by_W) >= 1
