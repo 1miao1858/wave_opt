@@ -57,3 +57,33 @@ def recompute_hit_rate(sol: MIPSolution) -> list[ValidationIssue]:
             )
         )
     return issues
+
+
+def check_boundary(sol: MIPSolution, max_skus_per_shelf: int) -> list[ValidationIssue]:
+    """6.5:每子波命中率应在 [1, max_skus_per_shelf] 区间。"""
+    issues: list[ValidationIssue] = []
+    _, per_subwave = _recompute_hit_rate_from_solution(sol)
+    for sw in per_subwave:
+        hr = sw["hit_rate"]
+        if hr < 1.0 - 1e-6:
+            issues.append(
+                ValidationIssue(
+                    check_name="6.5_boundary",
+                    severity="error",
+                    message=f"子波 {sw['subwave_idx']} 命中率 {hr:.4f} < 1(下界违规)",
+                    context=sw,
+                )
+            )
+        elif hr > max_skus_per_shelf + 1e-6:
+            issues.append(
+                ValidationIssue(
+                    check_name="6.5_boundary",
+                    severity="error",
+                    message=(
+                        f"子波 {sw['subwave_idx']} 命中率 {hr:.4f} > "
+                        f"max_skus_per_shelf={max_skus_per_shelf}(上界违规)"
+                    ),
+                    context=sw,
+                )
+            )
+    return issues
