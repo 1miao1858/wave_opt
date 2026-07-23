@@ -56,8 +56,9 @@ def simulate_window(
     cfg: Config,
     sub_problem_key: str,
     window_start=None,
+    W_seconds: int | None = None,
 ) -> WindowResult:
-    """对单窗口跑一次 Joint MIP(含预扫描剔除)。"""
+    """对单窗口跑一次 Joint MIP + 产能过滤(Filter 2/3)。"""
     # 预扫描缺货剔除
     kept_orders, rejected = _prefilter_stockout(window_orders, inv)
     rejected_ids = tuple(oid for oid, _ in rejected)
@@ -78,6 +79,54 @@ def simulate_window(
         )
 
     sub_cfg = cfg.sub_problems[sub_problem_key]
+
+    # === Filter 2:拣货员利用率 Σ 单单单耗 / num_pickers ≤ W ===
+    total_pick_time = sum(
+        cfg.sweep.pick_time_per_order for _ in kept_orders
+    )  # 简化:每单固定单耗;若需按订单件数缩放,后续可加
+    if W_seconds is None:
+        W_seconds = 3600  # 默认 1h
+    picker_util = total_pick_time / cfg.sweep.num_pickers / W_seconds
+
+    notes: list[str] = []
+    if picker_util > 1.0 + 1e-6:
+        return WindowResult(
+            window_start=window_start,
+            sub_problem_key=sub_problem_key,
+            feasible=False,
+            solution=None,
+            total_visits=0,
+            picker_utilization=picker_util,
+            machine_utilization=None,
+            rejected_order_ids=rejected_ids,
+            reject_reasons=reject_reasons,
+            notes=(f"picker_overload_{picker_util:.4f}",),
+        )
+
+    # === Filter 3:加工机器利用率(仅加工队列)===
+    machine_util: float | None = None
+    if sub_cfg.wave_type == "加工":
+        total_jian = sum(o.件数 for o in kept_orders)
+        machine_util = (
+            total_jian * cfg.sweep.process_time_per_jian
+            / cfg.sweep.num_machines
+            / W_seconds
+        )
+        if machine_util > 1.0 + 1e-6:
+            return WindowResult(
+                window_start=window_start,
+                sub_problem_key=sub_problem_key,
+                feasible=False,
+                solution=None,
+                total_visits=0,
+                picker_utilization=picker_util,
+                machine_utilization=machine_util,
+                rejected_order_ids=rejected_ids,
+                reject_reasons=reject_reasons,
+                notes=(f"machine_overload_{machine_util:.4f}",),
+            )
+
+    # === Joint MIP ===
     inp = MIPInput(
         window_orders=tuple(kept_orders),
         inv=inv,
@@ -85,14 +134,12 @@ def simulate_window(
         M_big=100,
         time_limit=cfg.mip.time_limit,
     )
-
     solver = JointMIPSolver(
         solver_name=cfg.mip.solver, mip_gap=cfg.mip.mip_gap
     )
     sol = solver.solve(inp)
 
     # 超时或不可行 → fallback 贪心
-    notes: list[str] = []
     if sol.status in ("time_limit", "infeasible"):
         if cfg.mip.fallback == "greedy":
             prev_status = sol.status
@@ -105,22 +152,21 @@ def simulate_window(
                 feasible=False,
                 solution=None,
                 total_visits=0,
-                picker_utilization=0.0,
-                machine_utilization=None,
+                picker_utilization=picker_util,
+                machine_utilization=machine_util,
                 rejected_order_ids=rejected_ids,
                 reject_reasons=reject_reasons,
                 notes=tuple(notes + [f"mip_status_{sol.status}"]),
             )
 
-    # 利用率(Filter 2/3 在 Task 21 实现;此处先返回 0)
     return WindowResult(
         window_start=window_start,
         sub_problem_key=sub_problem_key,
         feasible=True,
         solution=sol,
         total_visits=sol.total_visits,
-        picker_utilization=0.0,  # Task 21 填
-        machine_utilization=None,  # Task 21 填
+        picker_utilization=picker_util,
+        machine_utilization=machine_util,
         rejected_order_ids=rejected_ids,
         reject_reasons=reject_reasons,
         notes=tuple(notes),

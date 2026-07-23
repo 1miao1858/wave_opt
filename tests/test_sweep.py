@@ -99,3 +99,63 @@ def test_simulate_window_filters_stockout_orders():
     assert "STOCKOUT" in result.rejected_order_ids
     # 剔除后剩 3 单,MIP 正常跑
     assert result.total_visits == 3
+
+
+# === Task 21: Filter 2/3 拣货员与加工机器利用率 ===
+
+
+def test_picker_utilization_below_W_is_feasible():
+    """3 单 × 120s/单 / 4 picker = 90s < 3600s(1h)→ 利用率 ~2.5%,可行(< 100%)。"""
+    orders = load_orders(FIXTURE / "orders.csv")
+    snaps = load_inventory_snapshots(FIXTURE / "inventory_snapshots.csv")
+    cfg = _make_config(N_max=2)
+
+    result = simulate_window(
+        window_orders=orders,
+        inv=snaps[0],
+        cfg=cfg,
+        sub_problem_key="fei_jia_gong_le_20",
+        window_start=datetime.datetime(2026, 7, 1, 14, 0),
+        W_seconds=3600,
+    )
+
+    assert result.feasible
+    assert 0.0 < result.picker_utilization < 1.0
+    # 3 × 120 / 4 / 3600 = 0.025
+    assert abs(result.picker_utilization - 0.025) < 1e-6
+
+
+def test_picker_utilization_above_W_is_infeasible():
+    """W 太小:3 单 × 120s / 4 = 90s > W=10s → 不可行。"""
+    orders = load_orders(FIXTURE / "orders.csv")
+    snaps = load_inventory_snapshots(FIXTURE / "inventory_snapshots.csv")
+    cfg = _make_config(N_max=2)
+
+    result = simulate_window(
+        window_orders=orders,
+        inv=snaps[0],
+        cfg=cfg,
+        sub_problem_key="fei_jia_gong_le_20",
+        window_start=datetime.datetime(2026, 7, 1, 14, 0),
+        W_seconds=10,
+    )
+
+    assert not result.feasible
+    assert any("picker_overload" in n for n in result.notes)
+
+
+def test_machine_utilization_only_for_jia_gong():
+    """非加工队列 machine_utilization 应为 None。"""
+    orders = load_orders(FIXTURE / "orders.csv")
+    snaps = load_inventory_snapshots(FIXTURE / "inventory_snapshots.csv")
+    cfg = _make_config(N_max=2)
+
+    result = simulate_window(
+        window_orders=orders,
+        inv=snaps[0],
+        cfg=cfg,
+        sub_problem_key="fei_jia_gong_le_20",
+        window_start=datetime.datetime(2026, 7, 1, 14, 0),
+        W_seconds=3600,
+    )
+    assert result.machine_utilization is None  # 非加工不查机器
