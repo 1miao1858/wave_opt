@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.data_loader import InventorySnapshot
 from src.mip_solver import MIPSolution
 
 
@@ -125,4 +126,44 @@ def recompute_total_visits(sol: MIPSolution) -> list[ValidationIssue]:
                 context={"reported": sol.total_visits, "recomputed": total},
             )
         )
+    return issues
+
+
+def check_subwave_internal_split(
+    sol: MIPSolution, inv: InventorySnapshot
+) -> list[ValidationIssue]:
+    """6.8a:同 SKU 在同子波内被拆到多货架——核对是否有库存必要性。"""
+    issues: list[ValidationIssue] = []
+    for w in sol.wave_assignments:
+        # 按 SKU 聚合该子波用了哪些货架
+        sku_to_shelves: dict[str, set[str]] = {}
+        sku_to_qty: dict[str, int] = {}
+        for (sku, shelf), q in w.pick_qty.items():
+            if q > 0:
+                sku_to_shelves.setdefault(sku, set()).add(shelf)
+                sku_to_qty[sku] = sku_to_qty.get(sku, 0) + q
+        for sku, shelves in sku_to_shelves.items():
+            if len(shelves) <= 1:
+                continue
+            # 拆了——核对单货架库存是否够
+            total_needed = sku_to_qty[sku]
+            max_single = max(inv.inv.get((s, sku), 0) for s in shelves)
+            if max_single >= total_needed:
+                issues.append(
+                    ValidationIssue(
+                        check_name="6.8a_subwave_internal_split",
+                        severity="warning",
+                        message=(
+                            f"子波 {w.subwave_idx} 的 SKU {sku} 拆到 {sorted(shelves)} "
+                            f"拣,但单货架库存够({max_single} ≥ {total_needed})——无意义拆分"
+                        ),
+                        context={
+                            "subwave_idx": w.subwave_idx,
+                            "sku": sku,
+                            "shelves": sorted(shelves),
+                            "total_needed": total_needed,
+                            "max_single_shelf": max_single,
+                        },
+                    )
+                )
     return issues

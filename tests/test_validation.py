@@ -1,14 +1,22 @@
 from pathlib import Path
 import dataclasses
+import datetime
 
 import pytest
-from src.data_loader import load_orders, load_inventory_snapshots
-from src.mip_solver import MIPInput, JointMIPSolver, MIPSolution
+from src.data_loader import (
+    load_orders,
+    load_inventory_snapshots,
+    Order,
+    OrderLine,
+    InventorySnapshot,
+)
+from src.mip_solver import MIPInput, JointMIPSolver, MIPSolution, WaveAssignment
 from src.validation import (
     recompute_hit_rate,
     ValidationIssue,
     check_boundary,
     recompute_total_visits,
+    check_subwave_internal_split,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_case"
@@ -81,3 +89,74 @@ def test_recompute_total_visits_detects_mismatch():
     issues = recompute_total_visits(bad_sol)
     assert len(issues) >= 1
     assert issues[0].check_name == "6.7_recompute_total_visits"
+
+
+# === Task 16: 6.8a 子波内拆分检查 ===
+
+
+def _inv_for_test(sol):
+    """从 sol 构造一个最小 inv(只含涉及的 shelf, sku)。"""
+    inv_dict = {}
+    for (shelf, sku), consumed in sol.consumption.items():
+        inv_dict[(shelf, sku)] = consumed + 10  # 给点余量
+    shelf_skus: dict[str, set[str]] = {}
+    sku_shelves: dict[str, set[str]] = {}
+    for (shelf, sku), q in inv_dict.items():
+        if q > 0:
+            shelf_skus.setdefault(shelf, set()).add(sku)
+            sku_shelves.setdefault(sku, set()).add(shelf)
+    return InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 14, 0),
+        inv=inv_dict,
+        shelf_skus=shelf_skus,
+        sku_shelves=sku_shelves,
+    )
+
+
+def test_subwave_internal_split_no_issue_when_single_shelf():
+    sol, _ = _build_solution()
+    inv = _inv_for_test(sol)
+    issues = check_subwave_internal_split(sol, inv)
+    # tiny_case 最优解应无无意义拆分(MIP 不会做)
+    assert issues == []
+
+
+def test_subwave_internal_split_detects_when_present():
+    """构造一个故意拆分的解:子波 0 把 SKU K2 拆到 S1 和 S2 拣,但单货架库存就够。"""
+    order = Order(
+        order_id="X",
+        timestamp=datetime.datetime(2026, 7, 1, 14, 0),
+        wave_type="非加工",
+        lines=(OrderLine(sku_id="K2", qty=2),),
+        件数=2,
+        size_class="le_20",
+        sub_problem_key=("非加工", "le_20"),
+    )
+    wave = WaveAssignment(
+        subwave_idx=0,
+        orders=(order,),
+        visited_shelves=("S1", "S2"),
+        pick_qty={("K2", "S1"): 1, ("K2", "S2"): 1},  # 故意拆分
+        per_order_pick_qty={("X", "K2", "S1"): 1, ("X", "K2", "S2"): 1},
+    )
+    sol = MIPSolution(
+        status="mock",
+        wave_assignments=(wave,),
+        total_visits=2,
+        hit_rate=1.0,
+        consumption={("S1", "K2"): 1, ("S2", "K2"): 1},
+        objective_value=2.0,
+        solver_name="mock",
+    )
+    inv = InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 14, 0),
+        inv={("S1", "K2"): 5, ("S2", "K2"): 5},
+        shelf_skus={"S1": {"K2"}, "S2": {"K2"}},
+        sku_shelves={"K2": {"S1", "S2"}},
+    )
+    issues = check_subwave_internal_split(sol, inv)
+    assert any(
+        i.check_name == "6.8a_subwave_internal_split"
+        and i.context["sku"] == "K2"
+        for i in issues
+    )
