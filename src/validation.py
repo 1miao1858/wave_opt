@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.data_loader import InventorySnapshot
+from src.data_loader import InventorySnapshot, Order
 from src.mip_solver import MIPSolution
 
 
@@ -245,4 +245,53 @@ def check_inventory_consistency(
                     },
                 )
             )
+    return issues
+
+
+def audit_stockout_filter(
+    rejected_orders: list[Order], inv: InventorySnapshot
+) -> list[ValidationIssue]:
+    """6.4:核对被剔除订单是否真的全货架缺货(任一 SKU 不缺 → 报 issue)。"""
+    issues: list[ValidationIssue] = []
+    for order in rejected_orders:
+        for line in order.lines:
+            shelves = inv.sku_shelves.get(line.sku_id, set())
+            total_avail = sum(inv.inv.get((s, line.sku_id), 0) for s in shelves)
+            if total_avail >= line.qty:
+                issues.append(
+                    ValidationIssue(
+                        check_name="6.4_stockout_filter",
+                        severity="error",
+                        message=(
+                            f"订单 {order.order_id} 被剔除,但 SKU {line.sku_id} "
+                            f"全货架库存 {total_avail} ≥ 需求 {line.qty}"
+                            f"(预扫描逻辑可能误剔)"
+                        ),
+                        context={
+                            "order_id": order.order_id,
+                            "sku": line.sku_id,
+                            "needed": line.qty,
+                            "total_avail": total_avail,
+                        },
+                    )
+                )
+                break  # 一个 SKU 不缺就够了,不必继续查
+    return issues
+
+
+def check_mip_gap(sol: MIPSolution, threshold: float) -> list[ValidationIssue]:
+    """6.9:MIP gap 应 ≤ threshold(POC 5%)。"""
+    issues: list[ValidationIssue] = []
+    if sol.mip_gap is not None and sol.mip_gap > threshold:
+        issues.append(
+            ValidationIssue(
+                check_name="6.9_mip_gap",
+                severity="warning",
+                message=(
+                    f"MIP gap {sol.mip_gap:.4f} > 阈值 {threshold:.4f}"
+                    f"(求解器未收敛到 POC 标准)"
+                ),
+                context={"mip_gap": sol.mip_gap, "threshold": threshold},
+            )
+        )
     return issues

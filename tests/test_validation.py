@@ -19,6 +19,8 @@ from src.validation import (
     check_subwave_internal_split,
     check_cross_subwave_split,
     check_inventory_consistency,
+    audit_stockout_filter,
+    check_mip_gap,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_case"
@@ -269,3 +271,75 @@ def test_inventory_consistency_detects_when_next_lower_than_computed():
     consumption = {("S1", "K1"): 3}
     issues = check_inventory_consistency(inv_before, inv_after, consumption)
     assert any(i.check_name == "6.3_inventory_consistency" for i in issues)
+
+
+# === Task 19: 6.4 缺货剔除核对 + 6.9 MIP gap 监控 ===
+
+
+def _build_order(order_id: str, sku_id: str, qty: int) -> Order:
+    return Order(
+        order_id=order_id,
+        timestamp=datetime.datetime(2026, 7, 1, 14, 0),
+        wave_type="非加工",
+        lines=(OrderLine(sku_id=sku_id, qty=qty),),
+        件数=qty,
+        size_class="le_20",
+        sub_problem_key=("非加工", "le_20"),
+    )
+
+
+def test_stockout_filter_audit_flags_correctly_rejected():
+    """订单全 SKU 跨所有货架缺货 → 应被剔除(无 issue)。"""
+    inv = InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 14, 0),
+        inv={("S1", "K1"): 0, ("S2", "K1"): 0},  # K1 全 0
+        shelf_skus={},
+        sku_shelves={"K1": {"S1", "S2"}},
+    )
+    order = _build_order("X", "K1", 1)
+    issues = audit_stockout_filter(rejected_orders=[order], inv=inv)
+    # 正确剔除(全 0 库存)→ 无 issue
+    assert issues == []
+
+
+def test_stockout_filter_audit_flags_incorrectly_rejected():
+    """订单某 SKU 在某货架有库存,却被剔除 → 报 issue。"""
+    inv = InventorySnapshot(
+        snapshot_time=datetime.datetime(2026, 7, 1, 14, 0),
+        inv={("S1", "K1"): 5},  # K1 在 S1 有库存
+        shelf_skus={"S1": {"K1"}},
+        sku_shelves={"K1": {"S1"}},
+    )
+    order = _build_order("X", "K1", 1)
+    issues = audit_stockout_filter(rejected_orders=[order], inv=inv)
+    assert any(i.check_name == "6.4_stockout_filter" for i in issues)
+
+
+def test_mip_gap_ok_when_below_threshold():
+    sol = MIPSolution(
+        status="optimal",
+        wave_assignments=(),
+        total_visits=0,
+        hit_rate=0.0,
+        consumption={},
+        objective_value=0.0,
+        mip_gap=0.03,
+        solver_name="gurobi",
+    )
+    issues = check_mip_gap(sol, threshold=0.05)
+    assert issues == []
+
+
+def test_mip_gap_warns_when_above_threshold():
+    sol = MIPSolution(
+        status="time_limit",
+        wave_assignments=(),
+        total_visits=0,
+        hit_rate=0.0,
+        consumption={},
+        objective_value=0.0,
+        mip_gap=0.08,
+        solver_name="gurobi",
+    )
+    issues = check_mip_gap(sol, threshold=0.05)
+    assert any(i.check_name == "6.9_mip_gap" for i in issues)
