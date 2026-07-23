@@ -167,3 +167,44 @@ def check_subwave_internal_split(
                     )
                 )
     return issues
+
+
+def check_cross_subwave_split(
+    sol: MIPSolution, N_max: int
+) -> list[ValidationIssue]:
+    """6.8b:同 SKU 被拆到多个子波拣,但 total_orders ≤ N_max(本可同子波)。"""
+    issues: list[ValidationIssue] = []
+    # 每个 SKU 的 total_orders(从订单行算,不依赖子波分配)
+    sku_to_orders: dict[str, set[str]] = {}
+    sku_to_subwaves: dict[str, set[int]] = {}
+    for w in sol.wave_assignments:
+        for o in w.orders:
+            for line in o.lines:
+                sku_to_orders.setdefault(line.sku_id, set()).add(o.order_id)
+        for (sku, shelf), q in w.pick_qty.items():
+            if q > 0:
+                sku_to_subwaves.setdefault(sku, set()).add(w.subwave_idx)
+
+    for sku, subwaves in sku_to_subwaves.items():
+        if len(subwaves) <= 1:
+            continue
+        total_orders = len(sku_to_orders.get(sku, set()))
+        if total_orders <= N_max:
+            issues.append(
+                ValidationIssue(
+                    check_name="6.8b_cross_subwave_split",
+                    severity="warning",
+                    message=(
+                        f"SKU {sku} 拆到 {sorted(subwaves)} 个子波拣,"
+                        f"但 total_orders={total_orders} ≤ N_max={N_max}"
+                        f"(本可同子波)"
+                    ),
+                    context={
+                        "sku": sku,
+                        "subwaves": sorted(subwaves),
+                        "total_orders": total_orders,
+                        "N_max": N_max,
+                    },
+                )
+            )
+    return issues

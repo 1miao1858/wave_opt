@@ -17,6 +17,7 @@ from src.validation import (
     check_boundary,
     recompute_total_visits,
     check_subwave_internal_split,
+    check_cross_subwave_split,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_case"
@@ -157,6 +158,72 @@ def test_subwave_internal_split_detects_when_present():
     issues = check_subwave_internal_split(sol, inv)
     assert any(
         i.check_name == "6.8a_subwave_internal_split"
+        and i.context["sku"] == "K2"
+        for i in issues
+    )
+
+
+# === Task 17: 6.8b 跨子波拆分检查 ===
+
+
+def test_cross_subwave_split_fires_for_tiny_case():
+    sol, _ = _build_solution()
+    issues = check_cross_subwave_split(sol, N_max=2)
+    # tiny_case 最优 {A,C}+{B}:K2/K3 各跨 2 子波且 total_orders=2 ≤ N_max
+    # 或 {B,C}+{A}:K1/K2 各跨 2 子波且 total_orders=2 ≤ N_max
+    # 任一最优至少 2 个 SKU 触发 6.8b
+    assert len(issues) >= 1, f"tiny_case 最优应触发 6.8b,实际 issues={issues}"
+    assert all(i.check_name == "6.8b_cross_subwave_split" for i in issues)
+
+
+def test_cross_subwave_split_detects_when_present():
+    """构造:2 子波各 1 订单,同 SKU 拆到 2 子波,但 total_orders ≤ N_max。"""
+    order1 = Order(
+        order_id="X1",
+        timestamp=datetime.datetime(2026, 7, 1, 14, 0),
+        wave_type="非加工",
+        lines=(OrderLine(sku_id="K2", qty=1),),
+        件数=1,
+        size_class="le_20",
+        sub_problem_key=("非加工", "le_20"),
+    )
+    order2 = Order(
+        order_id="X2",
+        timestamp=datetime.datetime(2026, 7, 1, 14, 1),
+        wave_type="非加工",
+        lines=(OrderLine(sku_id="K2", qty=1),),
+        件数=1,
+        size_class="le_20",
+        sub_problem_key=("非加工", "le_20"),
+    )
+    sol = MIPSolution(
+        status="mock",
+        wave_assignments=(
+            WaveAssignment(
+                subwave_idx=0,
+                orders=(order1,),
+                visited_shelves=("S1",),
+                pick_qty={("K2", "S1"): 1},
+                per_order_pick_qty={("X1", "K2", "S1"): 1},
+            ),
+            WaveAssignment(
+                subwave_idx=1,
+                orders=(order2,),
+                visited_shelves=("S1",),
+                pick_qty={("K2", "S1"): 1},
+                per_order_pick_qty={("X2", "K2", "S1"): 1},
+            ),
+        ),
+        total_visits=2,
+        hit_rate=1.0,
+        consumption={("S1", "K2"): 2},
+        objective_value=2.0,
+        solver_name="mock",
+    )
+    issues = check_cross_subwave_split(sol, N_max=2)
+    # K2 在 2 个子波,total_orders_using_k = 2 ≤ N_max=2 → 应报
+    assert any(
+        i.check_name == "6.8b_cross_subwave_split"
         and i.context["sku"] == "K2"
         for i in issues
     )
