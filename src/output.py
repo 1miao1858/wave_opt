@@ -138,11 +138,28 @@ def _write_sheet1(wb: Workbook, results: dict[str, SweepResult]) -> None:
             row_idx += 1
 
 
+def _write_sheet2(wb: Workbook, results: dict[str, SweepResult]) -> None:
+    ws = wb.create_sheet("Sheet2_总访问数曲线")
+    headers = ["子问题", "W", "全日总货架访问数"]
+    ws.append(headers)
+    for col in ws[1]:
+        col.fill = HEADER_FILL
+        col.font = HEADER_FONT
+
+    for sp, result in results.items():
+        for W, window_results in result.window_results_by_W.items():
+            if not window_results:
+                continue
+            total = sum(r.total_visits for r in window_results if r.feasible)
+            ws.append([sp, W, total])
+
+
 def write_excel(results: dict[str, SweepResult], out_path: Path | str) -> None:
-    """写完整 Excel(5 Sheet)。Sheet 1 在此实现,Sheet 2-5 在 Task 25-28 添加。"""
+    """写完整 Excel(5 Sheet)。Sheet 1-2 在此实现,Sheet 3-5 在 Task 26-28 添加。"""
     out_path = Path(out_path)
     wb = Workbook()
     wb.remove(wb.active)  # 删默认 Sheet
     _write_sheet1(wb, results)
-    # Sheet 2-5 在 Task 25-28 添加
+    _write_sheet2(wb, results)
+    # Sheet 3-5 在 Task 26-28 添加
     wb.save(out_path)

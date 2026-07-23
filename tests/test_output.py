@@ -84,3 +84,21 @@ def test_excel_sheet1_has_summary(tmp_path):
     assert row[0] == "fei_jia_gong_le_20"
     assert isinstance(row[2], (int, float))  # 总货架访问数
     assert isinstance(row[3], (int, float))  # 平均命中率
+
+
+def test_excel_sheet2_has_visits_curve(tmp_path):
+    results = _build_sweep_results()
+    out_file = tmp_path / "out.xlsx"
+    write_excel(results, out_file)
+
+    wb = load_workbook(out_file)
+    assert "Sheet2_总访问数曲线" in wb.sheetnames
+    ws = wb["Sheet2_总访问数曲线"]
+    # 表头:子问题 | W | 全日总货架访问数
+    headers = [c.value for c in ws[1]]
+    assert "子问题" in headers
+    assert "W" in headers
+    assert "全日总货架访问数" in headers
+    # 至少一行数据(tiny_case 至少 1 个子问题 × 1 个 W)
+    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+    assert len(data_rows) >= 1
