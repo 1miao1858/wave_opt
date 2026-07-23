@@ -150,3 +150,54 @@ def test_excel_sheet4_has_wave_details(tmp_path):
     # tiny_case 1 窗口 × 2 子波 → 至少 2 行
     data_rows = list(ws.iter_rows(min_row=2, values_only=True))
     assert len(data_rows) >= 2
+
+
+def test_excel_sheet5_has_anomalies(tmp_path):
+    results = _build_sweep_results()
+    out_file = tmp_path / "out.xlsx"
+    write_excel(results, out_file)
+
+    wb = load_workbook(out_file)
+    assert "Sheet5_异常诊断" in wb.sheetnames
+    ws = wb["Sheet5_异常诊断"]
+    headers = [c.value for c in ws[1]]
+    # 应含:类别 | 子问题 | 窗口 | 详情
+    assert "类别" in headers
+    assert "详情" in headers
+    # 数据行可能为空(tiny_case 无异常),但表头应存在
+    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+    # 不强制要求行数(tiny_case 应无异常)
+
+
+def test_excel_sheet5_records_stockout_rejection(tmp_path):
+    """构造一个有缺货剔除的场景:Sheet 5 应记录。"""
+    import datetime
+
+    from src.data_loader import Order, OrderLine
+
+    orders = list(load_orders(FIXTURE / "orders.csv")) + [
+        Order(
+            order_id="STOCKOUT",
+            timestamp=datetime.datetime(2026, 7, 1, 14, 0),
+            wave_type="非加工",
+            lines=(OrderLine(sku_id="K_MISSING", qty=1),),
+            件数=1,
+            size_class="le_20",
+            sub_problem_key=("非加工", "le_20"),
+        ),
+    ]
+    snaps = load_inventory_snapshots(FIXTURE / "inventory_snapshots.csv")
+    cfg = _make_config(N_max=2)
+    runner = SweepRunner(cfg=cfg, all_orders=orders, snapshots=snaps)
+    results = {sp: runner.run_sub_problem(sp) for sp in cfg.sub_problems}
+
+    out_file = tmp_path / "out.xlsx"
+    write_excel(results, out_file)
+
+    wb = load_workbook(out_file)
+    ws = wb["Sheet5_异常诊断"]
+    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+    # 应有至少一行:缺货剔除
+    stockout_rows = [r for r in data_rows if r[0] == "缺货剔除"]
+    assert len(stockout_rows) >= 1
+    assert any("STOCKOUT" in str(r[3]) for r in stockout_rows)

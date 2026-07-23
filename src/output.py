@@ -260,8 +260,69 @@ def _write_sheet4(wb: Workbook, results: dict[str, SweepResult]) -> None:
                 ])
 
 
+def _write_sheet5(wb: Workbook, results: dict[str, SweepResult]) -> None:
+    ws = wb.create_sheet("Sheet5_异常诊断")
+    headers = ["类别", "子问题", "窗口", "详情"]
+    ws.append(headers)
+    for col in ws[1]:
+        col.fill = HEADER_FILL
+        col.font = HEADER_FONT
+
+    for sp, result in results.items():
+        for W, window_results in result.window_results_by_W.items():
+            for w_idx, w in enumerate(window_results):
+                window_id = (
+                    w.window_start.isoformat() if w.window_start else f"W{w_idx}"
+                )
+                # 缺货剔除
+                for oid, reason in zip(w.rejected_order_ids, w.reject_reasons):
+                    ws.append([
+                        "缺货剔除",
+                        sp,
+                        window_id,
+                        f"{oid}: {reason}",
+                    ])
+                # 不可行窗口
+                if not w.feasible:
+                    ws.append([
+                        "不可行窗口",
+                        sp,
+                        window_id,
+                        f"notes={list(w.notes)}",
+                    ])
+                # fallback 贪心
+                if w.solution and "fallback_greedy" in str(w.notes):
+                    ws.append([
+                        "MIP超时fallback贪心",
+                        sp,
+                        window_id,
+                        f"notes={list(w.notes)}",
+                    ])
+                # 子波拆分数 > 3
+                if w.solution and len(w.solution.wave_assignments) > 3:
+                    ws.append([
+                        "子波拆分数过多",
+                        sp,
+                        window_id,
+                        f"子波数={len(w.solution.wave_assignments)}"
+                        f"(N_max 可能过小)",
+                    ])
+                # MIP gap > 5%
+                if (
+                    w.solution
+                    and w.solution.mip_gap
+                    and w.solution.mip_gap > 0.05
+                ):
+                    ws.append([
+                        "MIP gap 超阈",
+                        sp,
+                        window_id,
+                        f"gap={w.solution.mip_gap:.4f}",
+                    ])
+
+
 def write_excel(results: dict[str, SweepResult], out_path: Path | str) -> None:
-    """写完整 Excel(5 Sheet)。Sheet 1-4 在此实现,Sheet 5 在 Task 28 添加。"""
+    """写完整 Excel(5 Sheet)。"""
     out_path = Path(out_path)
     wb = Workbook()
     wb.remove(wb.active)  # 删默认 Sheet
@@ -269,5 +330,5 @@ def write_excel(results: dict[str, SweepResult], out_path: Path | str) -> None:
     _write_sheet2(wb, results)
     _write_sheet3(wb, results)
     _write_sheet4(wb, results)
-    # Sheet 5 在 Task 28 添加
+    _write_sheet5(wb, results)
     wb.save(out_path)
