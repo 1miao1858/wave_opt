@@ -3,6 +3,8 @@
 变量:x[i,w] / z_qty[i,k,s] / y[s,w] / h[s,k,w]
 约束:C1' 履行 / C2 库存 / C3 链接(含 (1-x[i,w])) / C4 子波组成 / C5 单子波上限
 目标:min Σ_{w,s} y[s,w]
+
+后端:Gurobi(restricted license 2000 变量上限)或 SCIP(无 license 限制,慢 2-10x)。
 """
 from __future__ import annotations
 
@@ -15,6 +17,12 @@ try:
     HAS_GUROBI = True
 except ImportError:
     HAS_GUROBI = False
+
+try:
+    import pyscipopt as ps
+    HAS_SCIP = True
+except ImportError:
+    HAS_SCIP = False
 
 from src.data_loader import InventorySnapshot, Order
 
@@ -59,6 +67,201 @@ class JointMIPSolver:
         self.mip_gap = mip_gap
 
     def solve(self, inp: MIPInput) -> MIPSolution:
+        if self.solver_name == "gurobi":
+            if not HAS_GUROBI:
+                raise RuntimeError("gurobipy 未安装,请安装或改用 scip")
+            return self._solve_gurobi(inp)
+        elif self.solver_name == "scip":
+            if not HAS_SCIP:
+                raise RuntimeError("pyscipopt 未安装,请 pip install pyscipopt")
+            return self._solve_scip(inp)
+        else:
+            raise ValueError(f"未知 solver_name={self.solver_name}(支持: gurobi / scip)")
+
+    def _prep_sets(self, inp: MIPInput):
+        """共同集合预处理。"""
+        I = list(range(len(inp.window_orders)))
+        orders_by_idx = dict(zip(I, inp.window_orders))
+        K_i = {i: sorted({l.sku_id for l in orders_by_idx[i].lines}) for i in I}
+        S_k: dict[str, list[str]] = {}
+        for k in {k for ks in K_i.values() for k in ks}:
+            S_k[k] = sorted(inp.inv.sku_shelves.get(k, set()))
+        S = sorted({s for shelves in S_k.values() for s in shelves})
+        qty = {
+            (i, k): sum(l.qty for l in orders_by_idx[i].lines if l.sku_id == k)
+            for i in I for k in K_i[i]
+        }
+        inv_sk = dict(inp.inv.inv)
+        n_sub = max(1, (len(I) + inp.N_max - 1) // inp.N_max)
+        W_sub = list(range(n_sub))
+        K_per_shelf = {s: [k for k, shelves in S_k.items() if s in shelves] for s in S}
+        return I, orders_by_idx, K_i, S_k, S, qty, inv_sk, W_sub, K_per_shelf
+
+    def _solve_scip(self, inp: MIPInput) -> MIPSolution:
+        I, orders_by_idx, K_i, S_k, S, qty, inv_sk, W_sub, K_per_shelf = self._prep_sets(inp)
+        M_big = inp.M_big
+
+        m = ps.Model("joint_wave")
+        m.hideOutput()
+        m.setRealParam('limits/time', inp.time_limit)
+        m.setRealParam('limits/gap', self.mip_gap)
+
+        # 变量
+        x = {(i, w): m.addVar(name=f"x_{i}_{w}", vtype='BINARY')
+             for i in I for w in W_sub}
+        z_qty = {(i, k, s): m.addVar(name=f"z_{i}_{k}_{s}", vtype='INTEGER', lb=0)
+                 for i in I for k in K_i[i] for s in S_k[k]}
+        y = {(s, w): m.addVar(name=f"y_{s}_{w}", vtype='BINARY')
+             for s in S for w in W_sub}
+        h = {(s, k, w): m.addVar(name=f"h_{s}_{k}_{w}", vtype='BINARY')
+             for s in S for k in K_per_shelf[s] for w in W_sub}
+
+        # C1' 履行
+        for i in I:
+            for k in K_i[i]:
+                m.addCons(
+                    ps.quicksum(z_qty[(i, k, s)] for s in S_k[k]) == qty[(i, k)],
+                    name=f"C1_{i}_{k}",
+                )
+
+        # C2 库存
+        for s in S:
+            for k in K_per_shelf[s]:
+                m.addCons(
+                    ps.quicksum(
+                        z_qty[(i, k, s)]
+                        for i in I if k in K_i[i] and (i, k, s) in z_qty
+                    ) <= inv_sk.get((s, k), 0),
+                    name=f"C2_{s}_{k}",
+                )
+
+        # C3a/C3b 链接
+        for i in I:
+            for k in K_i[i]:
+                for s in S_k[k]:
+                    for w in W_sub:
+                        m.addCons(
+                            z_qty[(i, k, s)]
+                            <= M_big * y[(s, w)] + M_big * (1 - x[(i, w)]),
+                            name=f"C3a_{i}_{k}_{s}_{w}",
+                        )
+                        if (s, k, w) in h:
+                            m.addCons(
+                                z_qty[(i, k, s)]
+                                <= M_big * h[(s, k, w)] + M_big * (1 - x[(i, w)]),
+                                name=f"C3b_{i}_{k}_{s}_{w}",
+                            )
+
+        # C4 子波组成
+        for i in I:
+            m.addCons(
+                ps.quicksum(x[(i, w)] for w in W_sub) == 1,
+                name=f"C4_{i}",
+            )
+
+        # C5 单子波上限
+        for w in W_sub:
+            m.addCons(
+                ps.quicksum(x[(i, w)] for i in I) <= inp.N_max,
+                name=f"C5_{w}",
+            )
+
+        # 目标:min Σ_{w,s} y[s,w]
+        m.setObjective(ps.quicksum(y[(s, w)] for s in S for w in W_sub),
+                       sense='minimize')
+
+        m.optimize()
+
+        status = m.getStatus()
+        if status == "infeasible":
+            return MIPSolution(
+                status="infeasible",
+                wave_assignments=(),
+                total_visits=0,
+                hit_rate=0.0,
+                consumption={},
+                objective_value=0.0,
+                solver_name=self.solver_name,
+            )
+
+        order_to_wave: dict[int, int] = {}
+        for i in I:
+            for w in W_sub:
+                if m.getVal(x[(i, w)]) > 0.5:
+                    order_to_wave[i] = w
+                    break
+
+        wave_to_orders: dict[int, list] = {w: [] for w in W_sub}
+        for i, w in order_to_wave.items():
+            wave_to_orders[w].append(i)
+
+        wave_assignments: list[WaveAssignment] = []
+        consumption: dict[tuple[str, str], int] = {}
+        total_hits = 0
+        total_visits = 0
+
+        for w in W_sub:
+            order_idxs = wave_to_orders[w]
+            orders_in_w = tuple(orders_by_idx[i] for i in order_idxs)
+            visited: list[str] = []
+            pick_qty: dict[tuple[str, str], int] = {}
+            per_order_pick_qty: dict[tuple[str, str, str], int] = {}
+            shelf_sku_hits: dict[str, set[str]] = {}
+
+            for i in order_idxs:
+                order_id = orders_by_idx[i].order_id
+                for k in K_i[i]:
+                    for s in S_k[k]:
+                        q = m.getVal(z_qty[(i, k, s)])
+                        if q is None or q < 0.5:
+                            continue
+                        q_int = int(round(q))
+                        if q_int == 0:
+                            continue
+                        pick_qty[(k, s)] = pick_qty.get((k, s), 0) + q_int
+                        per_order_pick_qty[(order_id, k, s)] = q_int
+                        consumption[(s, k)] = consumption.get((s, k), 0) + q_int
+                        if s not in visited:
+                            visited.append(s)
+                        shelf_sku_hits.setdefault(s, set()).add(k)
+
+            y_visited = [s for s in S if m.getVal(y[(s, w)]) > 0.5]
+            visited = visited if visited else y_visited
+
+            hits = sum(len(sk_set) for sk_set in shelf_sku_hits.values())
+            total_hits += hits
+            total_visits += len(visited)
+
+            wave_assignments.append(
+                WaveAssignment(
+                    subwave_idx=w,
+                    orders=orders_in_w,
+                    visited_shelves=tuple(visited),
+                    pick_qty=pick_qty,
+                    per_order_pick_qty=per_order_pick_qty,
+                )
+            )
+
+        hit_rate = (total_hits / total_visits) if total_visits > 0 else 0.0
+
+        obj_val = m.getObjVal() if m.getObjVal() is not None else 0.0
+        try:
+            gap = m.getGap()
+        except Exception:
+            gap = None
+
+        return MIPSolution(
+            status="optimal" if status == "optimal" else "time_limit",
+            wave_assignments=tuple(wave_assignments),
+            total_visits=total_visits,
+            hit_rate=hit_rate,
+            consumption=consumption,
+            objective_value=obj_val,
+            mip_gap=gap,
+            solver_name=self.solver_name,
+        )
+
+    def _solve_gurobi(self, inp: MIPInput) -> MIPSolution:
         if not HAS_GUROBI and self.solver_name == "gurobi":
             raise RuntimeError("gurobipy 未安装,请安装或改用 scip")
 
