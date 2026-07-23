@@ -102,3 +102,21 @@ def test_excel_sheet2_has_visits_curve(tmp_path):
     # 至少一行数据(tiny_case 至少 1 个子问题 × 1 个 W)
     data_rows = list(ws.iter_rows(min_row=2, values_only=True))
     assert len(data_rows) >= 1
+
+
+def test_excel_sheet3_has_hit_rate_and_utilization(tmp_path):
+    results = _build_sweep_results()
+    out_file = tmp_path / "out.xlsx"
+    write_excel(results, out_file)
+
+    wb = load_workbook(out_file)
+    assert "Sheet3_命中率利用率" in wb.sheetnames
+    ws = wb["Sheet3_命中率利用率"]
+    headers = [c.value for c in ws[1]]
+    # 应含:子问题 | W | 平均命中率 | 拣货利用率 | 加工利用率
+    assert "子问题" in headers
+    assert "平均命中率" in headers
+    assert "拣货利用率" in headers
+    assert "加工利用率" in headers
+    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+    assert len(data_rows) >= 1

@@ -154,12 +154,47 @@ def _write_sheet2(wb: Workbook, results: dict[str, SweepResult]) -> None:
             ws.append([sp, W, total])
 
 
+def _write_sheet3(wb: Workbook, results: dict[str, SweepResult]) -> None:
+    ws = wb.create_sheet("Sheet3_命中率利用率")
+    headers = ["子问题", "W", "平均命中率", "拣货利用率", "加工利用率"]
+    ws.append(headers)
+    for col in ws[1]:
+        col.fill = HEADER_FILL
+        col.font = HEADER_FONT
+
+    for sp, result in results.items():
+        for W, window_results in result.window_results_by_W.items():
+            if not window_results:
+                continue
+            feasible = [r for r in window_results if r.feasible]
+            if not feasible:
+                continue
+            avg_hit = sum(r.solution.hit_rate for r in feasible) / len(feasible)
+            avg_picker = sum(r.picker_utilization for r in feasible) / len(feasible)
+            machine_vals = [
+                r.machine_utilization
+                for r in feasible
+                if r.machine_utilization is not None
+            ]
+            avg_machine = (
+                sum(machine_vals) / len(machine_vals) if machine_vals else None
+            )
+            ws.append([
+                sp,
+                W,
+                round(avg_hit, 4),
+                round(avg_picker, 4),
+                round(avg_machine, 4) if avg_machine is not None else None,
+            ])
+
+
 def write_excel(results: dict[str, SweepResult], out_path: Path | str) -> None:
-    """写完整 Excel(5 Sheet)。Sheet 1-2 在此实现,Sheet 3-5 在 Task 26-28 添加。"""
+    """写完整 Excel(5 Sheet)。Sheet 1-3 在此实现,Sheet 4-5 在 Task 27-28 添加。"""
     out_path = Path(out_path)
     wb = Workbook()
     wb.remove(wb.active)  # 删默认 Sheet
     _write_sheet1(wb, results)
     _write_sheet2(wb, results)
-    # Sheet 3-5 在 Task 26-28 添加
+    _write_sheet3(wb, results)
+    # Sheet 4-5 在 Task 27-28 添加
     wb.save(out_path)
