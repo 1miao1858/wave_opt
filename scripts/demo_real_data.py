@@ -74,9 +74,9 @@ def parse_args():
     )
     p.add_argument(
         "--solver",
-        choices=["gurobi", "scip", "highs", "both", "all"],
+        choices=["gurobi", "scip", "highs", "two_phase_a", "two_phase_b", "both", "all"],
         default="both",
-        help="求解器选择:both=gurobi+scip(legacy);all=所有已装的;可显式 gurobi/scip/highs",
+        help="求解器选择:both=gurobi+scip(legacy);all=所有已装的+two_phase;可显式各 solver",
     )
     p.add_argument(
         "--scenarios",
@@ -248,7 +248,7 @@ def main():
     if args.solver == "both":
         solvers = ["gurobi", "scip"]
     elif args.solver == "all":
-        solvers = ["gurobi", "scip", "highs"]
+        solvers = ["gurobi", "scip", "highs", "two_phase_a", "two_phase_b"]
     else:
         solvers = [args.solver]
     print()
@@ -278,9 +278,13 @@ def main():
             out_w.writerow(r)
             out_f.flush()
         gap_str = f"{r['gap']:.4f}" if r['gap'] != "" else "-"
+        time_str = f"{r['time_s']:>8.2f}" if isinstance(r['time_s'], (int, float)) else f"{'-':>8}"
+        visits_str = f"{r['visits']:>7}" if isinstance(r['visits'], (int, float)) else f"{'-':>7}"
+        hit_str = f"{r['hit_rate']:>6.3f}" if isinstance(r['hit_rate'], (int, float)) else f"{'-':>6}"
+        obj_str = f"{r['obj']:>7.0f}" if isinstance(r['obj'], (int, float)) else f"{'-':>7}"
         print(f"{r['solver']:>7} {r['n_orders']:>6} {r['N_max']:>5} {r['n_sub']:>5} "
-              f"{r['n_vars']:>8} {r['time_s']:>8.2f} {r['status']:>10} {r['visits']:>7} "
-              f"{r['hit_rate']:>6.3f} {gap_str:>7} {r['obj']:>7.0f}", flush=True)
+              f"{r['n_vars']:>8} {time_str} {r['status']:>10} {visits_str} "
+              f"{hit_str} {gap_str:>7} {obj_str}", flush=True)
 
     results = []
     for solver_name in solvers:
@@ -290,8 +294,8 @@ def main():
         if solver_name == "scip" and not HAS_SCIP:
             print(f"  [skip] scip 未安装", flush=True)
             continue
-        if solver_name == "highs" and not HAS_HIGHS:
-            print(f"  [skip] highs 未安装", flush=True)
+        if solver_name in ("highs", "two_phase_a", "two_phase_b") and not HAS_HIGHS:
+            print(f"  [skip] {solver_name} 需要 highspy", flush=True)
             continue
         for n_orders, N_max in scenarios:
             sample = orders_ok[:n_orders]
