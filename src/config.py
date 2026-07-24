@@ -32,7 +32,7 @@ class SweepConfig:
 
 @dataclass(frozen=True)
 class MipConfig:
-    solver: Literal["gurobi", "scip", "cbc"]
+    solver: Literal["gurobi", "scip", "highs", "cbc"]
     time_limit: int  # 秒
     mip_gap: float
     fallback: Literal["greedy"]

@@ -4,7 +4,7 @@
 约束:C1' 履行 / C2 库存 / C3 链接(含 (1-x[i,w])) / C4 子波组成 / C5 单子波上限
 目标:min Σ_{w,s} y[s,w]
 
-后端:Gurobi(restricted license 2000 变量上限)或 SCIP(无 license 限制,慢 2-10x)。
+后端:Gurobi(restricted license 2000 变量上限)/ SCIP(无 license,慢)/ HiGHS(无 license,开源,常快 2-5x)。
 
 建模收紧(2026-07-24):
 - 删 h[s,k,w] 辅助变量:原 spec 3.4 留作"事后推算命中率"用,实际代码用 z_qty 推算,h 是死代码
@@ -28,6 +28,13 @@ try:
     HAS_SCIP = True
 except ImportError:
     HAS_SCIP = False
+
+try:
+    import highspy
+    import numpy as np
+    HAS_HIGHS = True
+except ImportError:
+    HAS_HIGHS = False
 
 from src.data_loader import InventorySnapshot, Order
 
@@ -73,14 +80,18 @@ class JointMIPSolver:
     def solve(self, inp: MIPInput) -> MIPSolution:
         if self.solver_name == "gurobi":
             if not HAS_GUROBI:
-                raise RuntimeError("gurobipy 未安装,请安装或改用 scip")
+                raise RuntimeError("gurobipy 未安装,请安装或改用 scip/highs")
             return self._solve_gurobi(inp)
         elif self.solver_name == "scip":
             if not HAS_SCIP:
                 raise RuntimeError("pyscipopt 未安装,请 pip install pyscipopt")
             return self._solve_scip(inp)
+        elif self.solver_name == "highs":
+            if not HAS_HIGHS:
+                raise RuntimeError("highspy 未安装,请 pip install highspy")
+            return self._solve_highs(inp)
         else:
-            raise ValueError(f"未知 solver_name={self.solver_name}(支持: gurobi / scip)")
+            raise ValueError(f"未知 solver_name={self.solver_name}(支持: gurobi / scip / highs)")
 
     def _prep_sets(self, inp: MIPInput):
         """共同集合预处理。"""
@@ -418,5 +429,209 @@ class JointMIPSolver:
             consumption=consumption,
             objective_value=m.ObjVal if m.ObjVal is not None else 0.0,
             mip_gap=m.MIPGap if m.MIPGap is not None else None,
+            solver_name=self.solver_name,
+        )
+
+    def _solve_highs(self, inp: MIPInput) -> MIPSolution:
+        """HiGHS backend — 开源 MILP 求解器,API 用 col/row 索引 + numpy 数组。"""
+        I, orders_by_idx, K_i, S_k, S, qty, inv_sk, W_sub, K_per_shelf = self._prep_sets(inp)
+
+        h = highspy.Highs()
+        h.silent()
+        h.setOptionValue("time_limit", float(inp.time_limit))
+        h.setOptionValue("mip_rel_gap", float(self.mip_gap))
+        h.setOptionValue("output_flag", "false")
+
+        # === 添加列(变量)===
+        # 用数组批量 addCol 更高效,但 HiGHS Python binding 一次只加一个 col
+        x_idx: dict[tuple[int, int], int] = {}
+        z_idx: dict[tuple[int, int, str], int] = {}
+        y_idx: dict[tuple[str, int], int] = {}
+        empty_idx = np.array([], dtype=np.int32)
+        empty_val = np.array([], dtype=np.float64)
+
+        # x[i,w]:二元,cost=0
+        for i in I:
+            for w in W_sub:
+                x_idx[(i, w)] = h.getNumCol()
+                h.addCol(0.0, 0.0, 1.0, 0, empty_idx, empty_val)
+                h.setInteger(h.getNumCol() - 1)
+
+        # z_qty[i,k,s]:整数,上界 = qty[i,k](自然上界,跟 C3 紧化一致),cost=0
+        for i in I:
+            for k in K_i[i]:
+                for s in S_k[k]:
+                    z_idx[(i, k, s)] = h.getNumCol()
+                    ub = float(qty[(i, k)])
+                    h.addCol(0.0, 0.0, ub, 0, empty_idx, empty_val)
+                    h.setInteger(h.getNumCol() - 1)
+
+        # y[s,w]:二元,cost=1(目标函数系数)
+        for s in S:
+            for w in W_sub:
+                y_idx[(s, w)] = h.getNumCol()
+                h.addCol(1.0, 0.0, 1.0, 0, empty_idx, empty_val)
+                h.setInteger(h.getNumCol() - 1)
+
+        # === 添加行(约束)===
+        # C1' 履行:Σ_{s∈S(k)} z_qty[i,k,s] == qty[i,k]
+        for i in I:
+            for k in K_i[i]:
+                shelves = S_k[k]
+                idxs = np.array([z_idx[(i, k, s)] for s in shelves], dtype=np.int32)
+                vals = np.ones(len(shelves), dtype=np.float64)
+                q = float(qty[(i, k)])
+                h.addRow(q, q, len(shelves), idxs, vals)
+
+        # C2 库存:Σ_{i: k∈K(i)} z_qty[i,k,s] ≤ inv[s,k]
+        for s in S:
+            for k in K_per_shelf[s]:
+                cols = []
+                for i in I:
+                    if k in K_i[i] and (i, k, s) in z_idx:
+                        cols.append(z_idx[(i, k, s)])
+                if not cols:
+                    continue
+                idxs = np.array(cols, dtype=np.int32)
+                vals = np.ones(len(cols), dtype=np.float64)
+                ub = float(inv_sk.get((s, k), 0))
+                h.addRow(-highspy.kHighsInf, ub, len(cols), idxs, vals)
+
+        # C3 链接:z_qty[i,k,s] ≤ qty[i,k] * y[s,w] + qty[i,k] * (1 - x[i,w])
+        #   →  qty[i,k] * y[s,w] + qty[i,k] * (1 - x[i,w]) - z_qty[i,k,s] ≥ 0
+        #   →  -qty[i,k]*y[s,w] + qty[i,k]*x[i,w] + z_qty[i,k,s] ≤ qty[i,k]
+        for i in I:
+            for k in K_i[i]:
+                q = float(qty[(i, k)])
+                for s in S_k[k]:
+                    for w in W_sub:
+                        idxs = np.array([
+                            y_idx[(s, w)],
+                            x_idx[(i, w)],
+                            z_idx[(i, k, s)],
+                        ], dtype=np.int32)
+                        vals = np.array([-q, q, 1.0], dtype=np.float64)
+                        h.addRow(-highspy.kHighsInf, q, 3, idxs, vals)
+
+        # C4 子波组成:Σ_w x[i,w] == 1
+        for i in I:
+            idxs = np.array([x_idx[(i, w)] for w in W_sub], dtype=np.int32)
+            vals = np.ones(len(W_sub), dtype=np.float64)
+            h.addRow(1.0, 1.0, len(W_sub), idxs, vals)
+
+        # C5 单子波上限:Σ_i x[i,w] ≤ N_max
+        for w in W_sub:
+            idxs = np.array([x_idx[(i, w)] for i in I], dtype=np.int32)
+            vals = np.ones(len(I), dtype=np.float64)
+            h.addRow(-highspy.kHighsInf, float(inp.N_max), len(I), idxs, vals)
+
+        # === 目标:min Σ y[s,w](已在 addCol cost=1 for y, 其余 0)===
+        h.setMinimize()
+
+        # === 求解 ===
+        h.run()
+        status_name = h.getModelStatus().name
+
+        if status_name == "kInfeasible":
+            return MIPSolution(
+                status="infeasible",
+                wave_assignments=(),
+                total_visits=0,
+                hit_rate=0.0,
+                consumption={},
+                objective_value=0.0,
+                solver_name=self.solver_name,
+            )
+
+        # === 提取解 ===
+        col_value = h.getSolution().col_value
+
+        def _get(var_idx: int) -> float:
+            return float(col_value[var_idx])
+
+        # 子波组成
+        order_to_wave: dict[int, int] = {}
+        for i in I:
+            for w in W_sub:
+                if _get(x_idx[(i, w)]) > 0.5:
+                    order_to_wave[i] = w
+                    break
+
+        wave_to_orders: dict[int, list] = {w: [] for w in W_sub}
+        for i, w in order_to_wave.items():
+            wave_to_orders[w].append(i)
+
+        wave_assignments: list[WaveAssignment] = []
+        consumption: dict[tuple[str, str], int] = {}
+        total_hits = 0
+        total_visits = 0
+
+        for w in W_sub:
+            order_idxs = wave_to_orders[w]
+            orders_in_w = tuple(orders_by_idx[i] for i in order_idxs)
+            visited: list[str] = []
+            pick_qty: dict[tuple[str, str], int] = {}
+            per_order_pick_qty: dict[tuple[str, str, str], int] = {}
+            shelf_sku_hits: dict[str, set[str]] = {}
+
+            for i in order_idxs:
+                order_id = orders_by_idx[i].order_id
+                for k in K_i[i]:
+                    for s in S_k[k]:
+                        q = _get(z_idx[(i, k, s)])
+                        if q < 0.5:
+                            continue
+                        q_int = int(round(q))
+                        if q_int == 0:
+                            continue
+                        pick_qty[(k, s)] = pick_qty.get((k, s), 0) + q_int
+                        per_order_pick_qty[(order_id, k, s)] = q_int
+                        consumption[(s, k)] = consumption.get((s, k), 0) + q_int
+                        if s not in visited:
+                            visited.append(s)
+                        shelf_sku_hits.setdefault(s, set()).add(k)
+
+            y_visited = [s for s in S if _get(y_idx[(s, w)]) > 0.5]
+            visited = visited if visited else y_visited
+
+            hits = sum(len(sk_set) for sk_set in shelf_sku_hits.values())
+            total_hits += hits
+            total_visits += len(visited)
+
+            wave_assignments.append(
+                WaveAssignment(
+                    subwave_idx=w,
+                    orders=orders_in_w,
+                    visited_shelves=tuple(visited),
+                    pick_qty=pick_qty,
+                    per_order_pick_qty=per_order_pick_qty,
+                )
+            )
+
+        hit_rate = (total_hits / total_visits) if total_visits > 0 else 0.0
+
+        info = h.getInfo()
+        obj_val = float(info.objective_function_value)
+        gap = float(info.mip_gap) if info.mip_gap != float('inf') else None
+
+        # 状态映射
+        if status_name == "kOptimal":
+            out_status = "optimal"
+        elif status_name in ("kTimeLimit", "kIterationLimit", "kSolutionLimit",
+                              "kObjectiveTarget", "kObjectiveBound"):
+            out_status = "time_limit"
+        elif status_name == "kUnbounded":
+            out_status = "infeasible"
+        else:
+            out_status = "time_limit"  # 兜底
+
+        return MIPSolution(
+            status=out_status,
+            wave_assignments=tuple(wave_assignments),
+            total_visits=total_visits,
+            hit_rate=hit_rate,
+            consumption=consumption,
+            objective_value=obj_val,
+            mip_gap=gap,
             solver_name=self.solver_name,
         )

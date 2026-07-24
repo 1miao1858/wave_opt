@@ -39,7 +39,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 from src.data_loader import InventorySnapshot, Order, OrderLine
-from src.mip_solver import HAS_GUROBI, HAS_SCIP, JointMIPSolver, MIPInput
+from src.mip_solver import HAS_GUROBI, HAS_HIGHS, HAS_SCIP, JointMIPSolver, MIPInput
 
 DEFAULT_SCENARIOS = [
     (10, 5),
@@ -74,9 +74,9 @@ def parse_args():
     )
     p.add_argument(
         "--solver",
-        choices=["gurobi", "scip", "both"],
+        choices=["gurobi", "scip", "highs", "both", "all"],
         default="both",
-        help="求解器选择(默认 both)",
+        help="求解器选择:both=gurobi+scip(legacy);all=所有已装的;可显式 gurobi/scip/highs",
     )
     p.add_argument(
         "--scenarios",
@@ -245,56 +245,78 @@ def main():
     orders_ok = sorted(orders_ok, key=lambda o: o.order_id)
 
     scenarios = parse_scenarios(args.scenarios)
-    solvers = ["gurobi", "scip"] if args.solver == "both" else [args.solver]
-
+    if args.solver == "both":
+        solvers = ["gurobi", "scip"]
+    elif args.solver == "all":
+        solvers = ["gurobi", "scip", "highs"]
+    else:
+        solvers = [args.solver]
     print()
     print("=" * 100)
     print(f"Step 2: 跑 {len(scenarios)} 个场景 × {len(solvers)} 个 solver(time_limit={args.time_limit}s, gap={args.mip_gap})")
-    print("=" * 100)
+    print("=" * 100, flush=True)
     header = (f"{'solver':>7} {'n_ord':>6} {'N_max':>5} {'n_sub':>5} {'n_vars':>8} "
               f"{'time_s':>8} {'status':>10} {'visits':>7} {'hit':>6} {'gap':>7} {'obj':>7}")
-    print(header)
-    print("-" * 100)
+    print(header, flush=True)
+    print("-" * 100, flush=True)
+
+    out_path = Path(args.output) if args.output else None
+    fieldnames = ["solver", "n_orders", "N_max", "n_sub", "n_vars", "n_binary",
+                  "n_integer", "time_s", "status", "visits", "hit_rate", "gap", "obj"]
+    # 增量写 CSV:跑完一个场景就 flush,避免长时间跑看不到进度
+    out_f = None
+    out_w = None
+    if out_path:
+        out_f = out_path.open("w", newline="", encoding="utf-8-sig")
+        out_w = csv.DictWriter(out_f, fieldnames=fieldnames)
+        out_w.writeheader()
+        out_f.flush()
+
+    def _emit(r: dict):
+        """写一行到 CSV(增量) + 打印表行。"""
+        if out_w is not None:
+            out_w.writerow(r)
+            out_f.flush()
+        gap_str = f"{r['gap']:.4f}" if r['gap'] != "" else "-"
+        print(f"{r['solver']:>7} {r['n_orders']:>6} {r['N_max']:>5} {r['n_sub']:>5} "
+              f"{r['n_vars']:>8} {r['time_s']:>8.2f} {r['status']:>10} {r['visits']:>7} "
+              f"{r['hit_rate']:>6.3f} {gap_str:>7} {r['obj']:>7.0f}", flush=True)
 
     results = []
     for solver_name in solvers:
         if solver_name == "gurobi" and not HAS_GUROBI:
-            print(f"  [skip] gurobi 未安装")
+            print(f"  [skip] gurobi 未安装", flush=True)
             continue
         if solver_name == "scip" and not HAS_SCIP:
-            print(f"  [skip] scip 未安装")
+            print(f"  [skip] scip 未安装", flush=True)
+            continue
+        if solver_name == "highs" and not HAS_HIGHS:
+            print(f"  [skip] highs 未安装", flush=True)
             continue
         for n_orders, N_max in scenarios:
             sample = orders_ok[:n_orders]
             if len(sample) < n_orders:
-                print(f"  [skip] {solver_name} {n_orders}x{N_max}:样本不足(只有 {len(sample)} 单)")
+                print(f"  [skip] {solver_name} {n_orders}x{N_max}:样本不足(只有 {len(sample)} 单)", flush=True)
                 continue
+            print(f"  [start {n_orders}x{N_max} @ {datetime.now().strftime('%H:%M:%S')}] ...", flush=True)
             try:
                 r = run_one(sample, inv, N_max, args.time_limit, solver_name, args.mip_gap)
                 results.append(r)
-                gap_str = f"{r['gap']:.4f}" if r['gap'] != "" else "-"
-                print(f"{r['solver']:>7} {r['n_orders']:>6} {r['N_max']:>5} {r['n_sub']:>5} "
-                      f"{r['n_vars']:>8} {r['time_s']:>8.2f} {r['status']:>10} {r['visits']:>7} "
-                      f"{r['hit_rate']:>6.3f} {gap_str:>7} {r['obj']:>7.0f}")
+                _emit(r)
             except Exception as e:
-                print(f"  [FAIL] {solver_name} {n_orders}x{N_max}: {type(e).__name__}: {e}")
-                results.append({
+                print(f"  [FAIL] {solver_name} {n_orders}x{N_max}: {type(e).__name__}: {e}", flush=True)
+                r = {
                     "solver": solver_name, "n_orders": n_orders, "N_max": N_max,
                     "n_sub": (n_orders + N_max - 1)//N_max, "n_vars": "", "n_binary": "",
                     "n_integer": "", "time_s": "", "status": f"FAIL:{type(e).__name__}",
                     "visits": "", "hit_rate": "", "gap": "", "obj": "",
-                })
+                }
+                results.append(r)
+                _emit(r)
 
-    if args.output:
-        out_path = Path(args.output)
-        fieldnames = ["solver", "n_orders", "N_max", "n_sub", "n_vars", "n_binary",
-                      "n_integer", "time_s", "status", "visits", "hit_rate", "gap", "obj"]
-        with out_path.open("w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames)
-            w.writeheader()
-            for r in results:
-                w.writerow(r)
-        print(f"\n[输出] {out_path.absolute()}")
+    if out_f is not None:
+        out_f.close()
+        print(f"\n[输出] {out_path.absolute()}", flush=True)
 
     print()
     print("=" * 100)
