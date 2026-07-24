@@ -10,7 +10,7 @@ def _build_input(N_max=2):
     orders = load_orders(FIXTURE / "orders.csv")
     snaps = load_inventory_snapshots(FIXTURE / "inventory_snapshots.csv")
     inv = snaps[0]
-    return MIPInput(window_orders=orders, inv=inv, N_max=N_max, M_big=100, time_limit=60)
+    return MIPInput(window_orders=orders, inv=inv, N_max=N_max, time_limit=60)
 
 
 def test_mip_solver_returns_solution_with_variables():
@@ -80,16 +80,6 @@ def test_mip_solver_c3_linking_y_shelf_visited_when_pick():
                     f"子波 {w_idx}:SKU {sku} 从 {shelf} 拣 {q} 件,"
                     f"但 {shelf} 不在 visited_shelves 里(C3a 失效)"
                 )
-
-
-def test_mip_solver_c3_linking_h_sku_picked():
-    """C3b:若 z_qty[i,k,s]>0 且 x[i,w]=1,则 h[s,k,w]=1。"""
-    inp = _build_input()
-    solver = JointMIPSolver()
-    sol = solver.solve(inp)
-
-    # h 体现在 hit_rate 上,这里检查 hit_rate ≥ 1(每访问货架至少 1 hit)
-    assert sol.hit_rate >= 1.0
 
 
 def test_mip_solver_c4_each_order_in_exactly_one_subwave():

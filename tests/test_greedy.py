@@ -14,7 +14,6 @@ def _build_input(N_max=2):
         window_orders=tuple(orders),
         inv=snaps[0],
         N_max=N_max,
-        M_big=100,
         time_limit=60,
     )
 

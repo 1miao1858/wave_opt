@@ -191,7 +191,6 @@ def run_one(orders, inv, N_max, time_limit, solver_name, mip_gap):
         window_orders=tuple(orders),
         inv=inv,
         N_max=N_max,
-        M_big=max((l.qty for o in orders for l in o.lines), default=1),
         time_limit=time_limit,
     )
     n_var, n_bin, n_int = count_vars_constraints(inp)

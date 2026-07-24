@@ -33,7 +33,6 @@ def _build_solution():
         window_orders=tuple(orders),
         inv=snaps[0],
         N_max=2,
-        M_big=100,
         time_limit=60,
     )
     return JointMIPSolver().solve(inp), inp

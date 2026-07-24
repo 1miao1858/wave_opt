@@ -178,7 +178,6 @@ def simulate_window(
         window_orders=tuple(kept_orders),
         inv=inv,
         N_max=sub_cfg.N_max,
-        M_big=100,
         time_limit=cfg.mip.time_limit,
     )
     solver = JointMIPSolver(

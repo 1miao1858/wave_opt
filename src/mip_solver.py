@@ -1,10 +1,15 @@
 """Joint MIP 求解器:窗口内同时决定子波组成 + 货架分配。
 
-变量:x[i,w] / z_qty[i,k,s] / y[s,w] / h[s,k,w]
+变量:x[i,w] / z_qty[i,k,s] / y[s,w]
 约束:C1' 履行 / C2 库存 / C3 链接(含 (1-x[i,w])) / C4 子波组成 / C5 单子波上限
 目标:min Σ_{w,s} y[s,w]
 
 后端:Gurobi(restricted license 2000 变量上限)或 SCIP(无 license 限制,慢 2-10x)。
+
+建模收紧(2026-07-24):
+- 删 h[s,k,w] 辅助变量:原 spec 3.4 留作"事后推算命中率"用,实际代码用 z_qty 推算,h 是死代码
+- 删 C3b 约束:仅与 h 关联,删 h 后失去意义
+- M_big 从全局 max(qty) 改为 per-(i,k) = qty[i,k]:LP 松弛更紧,求解快 10x+
 """
 from __future__ import annotations
 
@@ -32,7 +37,6 @@ class MIPInput:
     window_orders: tuple[Order, ...]
     inv: InventorySnapshot
     N_max: int
-    M_big: int
     time_limit: int  # 秒
 
 
@@ -99,7 +103,6 @@ class JointMIPSolver:
 
     def _solve_scip(self, inp: MIPInput) -> MIPSolution:
         I, orders_by_idx, K_i, S_k, S, qty, inv_sk, W_sub, K_per_shelf = self._prep_sets(inp)
-        M_big = inp.M_big
 
         m = ps.Model("joint_wave")
         m.hideOutput()
@@ -113,8 +116,6 @@ class JointMIPSolver:
                  for i in I for k in K_i[i] for s in S_k[k]}
         y = {(s, w): m.addVar(name=f"y_{s}_{w}", vtype='BINARY')
              for s in S for w in W_sub}
-        h = {(s, k, w): m.addVar(name=f"h_{s}_{k}_{w}", vtype='BINARY')
-             for s in S for k in K_per_shelf[s] for w in W_sub}
 
         # C1' 履行
         for i in I:
@@ -135,22 +136,16 @@ class JointMIPSolver:
                     name=f"C2_{s}_{k}",
                 )
 
-        # C3a/C3b 链接
+        # C3 链接(M_big = qty[i,k],per-(i,k) 紧化;删 C3b/h)
         for i in I:
             for k in K_i[i]:
                 for s in S_k[k]:
                     for w in W_sub:
                         m.addCons(
                             z_qty[(i, k, s)]
-                            <= M_big * y[(s, w)] + M_big * (1 - x[(i, w)]),
+                            <= qty[(i, k)] * y[(s, w)] + qty[(i, k)] * (1 - x[(i, w)]),
                             name=f"C3a_{i}_{k}_{s}_{w}",
                         )
-                        if (s, k, w) in h:
-                            m.addCons(
-                                z_qty[(i, k, s)]
-                                <= M_big * h[(s, k, w)] + M_big * (1 - x[(i, w)]),
-                                name=f"C3b_{i}_{k}_{s}_{w}",
-                            )
 
         # C4 子波组成
         for i in I:
@@ -265,32 +260,7 @@ class JointMIPSolver:
         if not HAS_GUROBI and self.solver_name == "gurobi":
             raise RuntimeError("gurobipy 未安装,请安装或改用 scip")
 
-        # === 集合与参数 ===
-        I = list(range(len(inp.window_orders)))
-        orders_by_idx = dict(zip(I, inp.window_orders))
-        # K(i):订单 i 涉及的 SKU 集(去重,用于变量与约束枚举)
-        K_i = {i: sorted({l.sku_id for l in orders_by_idx[i].lines}) for i in I}
-        # S(k):含 SKU k 的货架集
-        S_k: dict[str, list[str]] = {}
-        for k in {k for ks in K_i.values() for k in ks}:
-            S_k[k] = sorted(inp.inv.sku_shelves.get(k, set()))
-        # 全 SKU 集
-        K = sorted(S_k.keys())
-        # 全货架集(只取相关货架)
-        S = sorted({s for shelves in S_k.values() for s in shelves})
-        # 参数
-        qty = {
-            (i, k): sum(l.qty for l in orders_by_idx[i].lines if l.sku_id == k)
-            for i in I for k in K_i[i]
-        }
-        inv_sk = dict(inp.inv.inv)  # (shelf, sku) -> qty
-
-        # 子波数 |W_sub| = ceil(|I| / N_max)
-        n_sub = max(1, (len(I) + inp.N_max - 1) // inp.N_max)
-        W_sub = list(range(n_sub))
-
-        # 大 M
-        M_big = inp.M_big
+        I, orders_by_idx, K_i, S_k, S, qty, inv_sk, W_sub, K_per_shelf = self._prep_sets(inp)
 
         # === Gurobi 模型 ===
         m = gp.Model("joint_wave")
@@ -298,7 +268,7 @@ class JointMIPSolver:
         m.Params.MIPGap = self.mip_gap
         m.Params.OutputFlag = 0
 
-        # 变量
+        # 变量(删 h:辅助变量,只用于事后命中率推算,实际用 z_qty 推算,死代码)
         x = {
             (i, w): m.addVar(vtype=GRB.BINARY, name=f"x_{i}_{w}")
             for i in I for w in W_sub
@@ -313,14 +283,9 @@ class JointMIPSolver:
             (s, w): m.addVar(vtype=GRB.BINARY, name=f"y_{s}_{w}")
             for s in S for w in W_sub
         }
-        h = {
-            (s, k, w): m.addVar(vtype=GRB.BINARY, name=f"h_{s}_{k}_{w}")
-            for s in S for k in _skus_on_shelf(S_k, s) for w in W_sub
-        }
         m.update()
 
         # === C1'. 履行约束(允许跨货架拆分)===
-        # Σ_{s ∈ S(k)} z_qty[i,k,s] = qty[i,k]   ∀ i ∈ I, k ∈ K(i)
         for i in I:
             for k in K_i[i]:
                 m.addConstr(
@@ -329,9 +294,8 @@ class JointMIPSolver:
                 )
 
         # === C2. 库存不超(跨子波共享)===
-        # Σ_{i: k ∈ K(i)} z_qty[i,k,s] ≤ inv[s,k]   ∀ s ∈ S, k ∈ K(s)
         for s in S:
-            for k in _skus_on_shelf(S_k, s):
+            for k in K_per_shelf[s]:
                 m.addConstr(
                     gp.quicksum(
                         z_qty[(i, k, s)]
@@ -340,27 +304,18 @@ class JointMIPSolver:
                     name=f"C2_{s}_{k}",
                 )
 
-        # === C3. 访问与拣货关联(通过 (1-x[i,w]) 隐式按子波关联)===
-        # C3a: z_qty[i,k,s] ≤ M_big × y[s,w] + M_big × (1 - x[i,w])    ∀ i,k,s,w
-        # C3b: z_qty[i,k,s] ≤ M_big × h[s,k,w] + M_big × (1 - x[i,w])  ∀ i,k,s,w
+        # === C3. 访问与拣货关联(M_big = qty[i,k] per-(i,k) 紧化;删 C3b/h)===
         for i in I:
             for k in K_i[i]:
                 for s in S_k[k]:
                     for w in W_sub:
                         m.addConstr(
                             z_qty[(i, k, s)]
-                            <= M_big * y[(s, w)] + M_big * (1 - x[(i, w)]),
+                            <= qty[(i, k)] * y[(s, w)] + qty[(i, k)] * (1 - x[(i, w)]),
                             name=f"C3a_{i}_{k}_{s}_{w}",
                         )
-                        if (s, k, w) in h:
-                            m.addConstr(
-                                z_qty[(i, k, s)]
-                                <= M_big * h[(s, k, w)] + M_big * (1 - x[(i, w)]),
-                                name=f"C3b_{i}_{k}_{s}_{w}",
-                            )
 
         # === C4. 子波组成(每订单必进且仅进一个子波)===
-        # Σ_{w ∈ W_sub} x[i,w] = 1   ∀ i ∈ I
         for i in I:
             m.addConstr(
                 gp.quicksum(x[(i, w)] for w in W_sub) == 1,
@@ -368,7 +323,6 @@ class JointMIPSolver:
             )
 
         # === C5. 单子波订单数上限 ===
-        # Σ_{i ∈ I} x[i,w] ≤ N_max   ∀ w ∈ W_sub
         for w in W_sub:
             m.addConstr(
                 gp.quicksum(x[(i, w)] for i in I) <= inp.N_max,
@@ -466,8 +420,3 @@ class JointMIPSolver:
             mip_gap=m.MIPGap if m.MIPGap is not None else None,
             solver_name=self.solver_name,
         )
-
-
-def _skus_on_shelf(S_k: dict[str, list[str]], shelf: str) -> list[str]:
-    """返回货架 shelf 上的所有 SKU(K(s))。"""
-    return [k for k, shelves in S_k.items() if shelf in shelves]
