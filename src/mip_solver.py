@@ -98,8 +98,10 @@ class JointMIPSolver:
             if not HAS_HIGHS:
                 raise RuntimeError("two_phase_b 依赖 highspy,请 pip install highspy")
             return self._solve_two_phase_b(inp)
+        elif self.solver_name == "greedy_a":
+            return self._solve_greedy_a(inp)
         else:
-            raise ValueError(f"未知 solver_name={self.solver_name}(支持: gurobi / scip / highs / two_phase_a / two_phase_b)")
+            raise ValueError(f"未知 solver_name={self.solver_name}(支持: gurobi / scip / highs / two_phase_a / two_phase_b / greedy_a)")
 
     def _prep_sets(self, inp: MIPInput):
         """共同集合预处理。"""
@@ -1104,5 +1106,131 @@ class JointMIPSolver:
             consumption=consumption,
             objective_value=obj_val,
             mip_gap=None,  # 跨子波 gap 不直接可比,留 None
+            solver_name=self.solver_name,
+        )
+
+    def _solve_greedy_a(self, inp: MIPInput) -> MIPSolution:
+        """两阶段贪心(方案 A 结构,无 MIP):
+        阶段 1:对每订单每 SKU,优先选「已用过的货架」凑齐,其次库存多的,
+                最小化 used_shelves 全集大小。
+        阶段 2:按 R_i 大小降序放,每子波挑「加入后新增访问数最少」的订单,
+                最小化 Σ_w |∪_{i∈w} R_i|。
+
+        无 LP 松弛,gap=None;status 用 "optimal" 表示贪心完成(非数学最优)。
+        """
+        I, orders_by_idx, K_i, S_k, _S, qty, inv_sk, W_sub, _K_per_shelf = self._prep_sets(inp)
+
+        # === 阶段 1:greedy z_qty 分配 ===
+        remaining_inv = dict(inv_sk)
+        used_shelves: set[str] = set()
+        per_order_R: dict[int, set[str]] = {i: set() for i in I}
+        z_qty: dict[tuple[int, str, str], int] = {}
+
+        for i in I:
+            for k in K_i[i]:
+                shelves = S_k[k]
+                # 优先选已在 used_shelves 的(s not in used 排前 → False=0 优先),
+                # 其次库存多的(-avail 排前 → 多的先)
+                sorted_shelves = sorted(
+                    shelves,
+                    key=lambda s, k=k: (
+                        s not in used_shelves,
+                        -remaining_inv.get((s, k), 0),
+                    ),
+                )
+                remaining = qty[(i, k)]
+                for s in sorted_shelves:
+                    if remaining <= 0:
+                        break
+                    avail = remaining_inv.get((s, k), 0)
+                    if avail <= 0:
+                        continue
+                    take = min(avail, remaining)
+                    z_qty[(i, k, s)] = take
+                    remaining_inv[(s, k)] = avail - take
+                    remaining -= take
+                    used_shelves.add(s)
+                    per_order_R[i].add(s)
+
+        # === 阶段 2:greedy 组波 ===
+        wave_orders: list[list[int]] = [[] for _ in W_sub]
+        wave_shelves: list[set[str]] = [set() for _ in W_sub]
+        unassigned = sorted(I, key=lambda i: -len(per_order_R[i]))
+
+        for w in W_sub:
+            while len(wave_orders[w]) < inp.N_max and unassigned:
+                best_i = None
+                best_cost = float("inf")
+                ws = wave_shelves[w]
+                for i in unassigned:
+                    cost = len(per_order_R[i] - ws)
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_i = i
+                if best_i is None:
+                    break
+                wave_orders[w].append(best_i)
+                ws.update(per_order_R[best_i])
+                unassigned.remove(best_i)
+
+        # 防御:unassigned 还有(子波数算错时)塞到最后一波
+        if unassigned:
+            last_w = W_sub[-1]
+            for i in unassigned:
+                wave_orders[last_w].append(i)
+                wave_shelves[last_w].update(per_order_R[i])
+
+        # === 构造 MIPSolution ===
+        wave_assignments: list[WaveAssignment] = []
+        consumption: dict[tuple[str, str], int] = {}
+        total_hits = 0
+        total_visits = 0
+
+        for w in W_sub:
+            order_idxs = wave_orders[w]
+            orders_in_w = tuple(orders_by_idx[i] for i in order_idxs)
+            visited: list[str] = []
+            pick_qty: dict[tuple[str, str], int] = {}
+            per_order_pick_qty: dict[tuple[str, str, str], int] = {}
+            shelf_sku_hits: dict[str, set[str]] = {}
+
+            for i in order_idxs:
+                order_id = orders_by_idx[i].order_id
+                for k in K_i[i]:
+                    for s in S_k[k]:
+                        q = z_qty.get((i, k, s), 0)
+                        if q == 0:
+                            continue
+                        pick_qty[(k, s)] = pick_qty.get((k, s), 0) + q
+                        per_order_pick_qty[(order_id, k, s)] = q
+                        consumption[(s, k)] = consumption.get((s, k), 0) + q
+                        if s not in visited:
+                            visited.append(s)
+                        shelf_sku_hits.setdefault(s, set()).add(k)
+
+            hits = sum(len(sk_set) for sk_set in shelf_sku_hits.values())
+            total_hits += hits
+            total_visits += len(visited)
+
+            wave_assignments.append(
+                WaveAssignment(
+                    subwave_idx=w,
+                    orders=orders_in_w,
+                    visited_shelves=tuple(visited),
+                    pick_qty=pick_qty,
+                    per_order_pick_qty=per_order_pick_qty,
+                )
+            )
+
+        hit_rate = (total_hits / total_visits) if total_visits > 0 else 0.0
+
+        return MIPSolution(
+            status="optimal",  # greedy 完成即 "optimal"(非数学最优,但无 LP bound 可报)
+            wave_assignments=tuple(wave_assignments),
+            total_visits=total_visits,
+            hit_rate=hit_rate,
+            consumption=consumption,
+            objective_value=float(total_visits),
+            mip_gap=None,
             solver_name=self.solver_name,
         )

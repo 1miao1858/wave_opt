@@ -74,9 +74,9 @@ def parse_args():
     )
     p.add_argument(
         "--solver",
-        choices=["gurobi", "scip", "highs", "two_phase_a", "two_phase_b", "both", "all"],
+        choices=["gurobi", "scip", "highs", "two_phase_a", "two_phase_b", "greedy_a", "both", "all"],
         default="both",
-        help="求解器选择:both=gurobi+scip(legacy);all=所有已装的+two_phase;可显式各 solver",
+        help="求解器选择:both=gurobi+scip(legacy);all=所有已装的+two_phase+greedy;可显式各 solver",
     )
     p.add_argument(
         "--scenarios",
@@ -248,7 +248,7 @@ def main():
     if args.solver == "both":
         solvers = ["gurobi", "scip"]
     elif args.solver == "all":
-        solvers = ["gurobi", "scip", "highs", "two_phase_a", "two_phase_b"]
+        solvers = ["gurobi", "scip", "highs", "two_phase_a", "two_phase_b", "greedy_a"]
     else:
         solvers = [args.solver]
     print()
